@@ -110,3 +110,9 @@ func (a *StateAssembler) Reconcile(ctx context.Context, batch ObservationBatch) 
 func (a *StateAssembler) ReconcileAndMaterialize(ctx context.Context, batch ObservationBatch) (*ReconciliationResult, error) {
 	return a.reconciler.ReconcileAndMaterialize(ctx, batch)
 }
+
+// Rematerialize refreshes the Rust Core Engine state from persisted store for workspaceID.
+func (a *StateAssembler) Rematerialize(ctx context.Context, workspaceID string) error {
+	return a.reconciler.Rematerialize(ctx, workspaceID)
+}
+

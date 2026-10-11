@@ -22,6 +22,8 @@ type mockK8sClient struct {
 	namespaces []k8s.Namespace
 	pods       []k8s.Pod
 	collectErr error
+	podsErr    error
+	ingressErr error
 }
 
 func (m *mockK8sClient) Ping(ctx context.Context) error {
@@ -44,9 +46,15 @@ func (m *mockK8sClient) ListServices(ctx context.Context, ns string) ([]k8s.Serv
 	return nil, nil
 }
 func (m *mockK8sClient) ListIngresses(ctx context.Context, ns string) ([]k8s.Ingress, error) {
+	if m.ingressErr != nil {
+		return nil, m.ingressErr
+	}
 	return nil, nil
 }
 func (m *mockK8sClient) ListPods(ctx context.Context, ns string) ([]k8s.Pod, error) {
+	if m.podsErr != nil {
+		return nil, m.podsErr
+	}
 	if m.collectErr != nil {
 		return nil, m.collectErr
 	}
@@ -98,6 +106,11 @@ func (m *mockReconciler) ReconcileAndMaterialize(ctx context.Context, batch stat
 		Duration:             10 * time.Millisecond,
 	}, nil
 }
+
+func (m *mockReconciler) Rematerialize(ctx context.Context, workspaceID string) error {
+	return nil
+}
+
 
 func TestDiscoverySync_Success(t *testing.T) {
 	wsID := "00000000-0000-0000-0000-000000000001"
@@ -317,3 +330,113 @@ func TestDiscoverySync_Conflict_ConcurrentRequests(t *testing.T) {
 		t.Errorf("expected 200 OK for first request, got %d: %s", rec1.Code, rec1.Body.String())
 	}
 }
+
+func TestDiscoverySync_RequiredScopeFailure_ReconciliationBlocked(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	logger := logging.NewStandardLogger(nil, logging.LevelWarn)
+
+	client := &mockK8sClient{
+		podsErr: errors.New("pods: rbac forbidden"),
+	}
+
+	collector, err := k8s.New(
+		k8s.WithClusterID("test-cluster"),
+		k8s.WithWorkspaceID(wsID),
+		k8s.WithClient(client),
+		k8s.WithLogger(logger),
+	)
+	if err != nil {
+		t.Fatalf("failed to create collector: %v", err)
+	}
+
+	rec := &mockReconciler{}
+
+	cfg := api.DefaultConfig()
+	cfg.IsTest = true
+	cfg.ConfiguredWorkspaceID = wsID
+	cfg.K8sCollector = collector
+	cfg.Reconciler = rec
+	cfg.Logger = logger
+
+	srv := api.NewServer(cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync?workspace_id="+wsID, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	// Required scope failure must return 502 with COLLECTION_INCOMPLETE
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var errResp api.ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp.Code != "COLLECTION_INCOMPLETE" {
+		t.Errorf("expected error code COLLECTION_INCOMPLETE, got %s", errResp.Code)
+	}
+
+	// CRITICAL: Reconciliation MUST be blocked; DB state preserved
+	if rec.reconciled {
+		t.Errorf("expected reconciler NOT to be invoked when required scope fails")
+	}
+}
+
+func TestDiscoverySync_PartialCollection_Success(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	logger := logging.NewStandardLogger(nil, logging.LevelWarn)
+
+	// Ingress fails (optional scope), but pods succeed (required scope)
+	client := &mockK8sClient{
+		ingressErr: errors.New("ingresses: 404 not found"),
+		pods: []k8s.Pod{{
+			ObjectMeta: k8s.ObjectMeta{Name: "app-pod", Namespace: "default"},
+			Status:     k8s.PodStatus{PodIP: "10.0.0.1"},
+		}},
+	}
+
+	collector, err := k8s.New(
+		k8s.WithClusterID("test-cluster"),
+		k8s.WithWorkspaceID(wsID),
+		k8s.WithClient(client),
+		k8s.WithLogger(logger),
+	)
+	if err != nil {
+		t.Fatalf("failed to create collector: %v", err)
+	}
+
+	rec := &mockReconciler{}
+
+	cfg := api.DefaultConfig()
+	cfg.IsTest = true
+	cfg.ConfiguredWorkspaceID = wsID
+	cfg.K8sCollector = collector
+	cfg.Reconciler = rec
+	cfg.Logger = logger
+
+	srv := api.NewServer(cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync?workspace_id="+wsID, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	// Optional scope failure allows reconciliation, returns 200 OK with status PARTIAL
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp api.DiscoverySyncResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Status != "PARTIAL" {
+		t.Errorf("expected status PARTIAL, got %s", resp.Status)
+	}
+
+	// Reconciliation MUST have run
+	if !rec.reconciled {
+		t.Errorf("expected reconciler to run for partial collection")
+	}
+}
+

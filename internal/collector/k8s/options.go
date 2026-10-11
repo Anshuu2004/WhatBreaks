@@ -84,3 +84,12 @@ func WithReconcileInterval(interval time.Duration) Option {
 		}
 	}
 }
+
+// WithScopePolicy sets the scope requirement policy for collection completeness.
+func WithScopePolicy(policy *ScopePolicy) Option {
+	return func(c *Collector) {
+		if policy != nil {
+			c.scopePolicy = policy
+		}
+	}
+}

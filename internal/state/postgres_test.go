@@ -603,3 +603,190 @@ func TestPostgresStore_ReconcilerLifecycle(t *testing.T) {
 		t.Errorf("expected 1 impacted resource (frontend) in Rust Core Engine, got %d", ans.Summary.ImpactedCount)
 	}
 }
+
+func TestPostgresStore_PartialCollectionSafety(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logger := logging.NewJSONLogger(nil, logging.LevelDebug, "pg-partial-safety-test")
+	db, err := database.New(ctx, cfg, database.WithLogger(logger))
+	if err != nil {
+		t.Skipf("Failed to initialize database pool: %v; skipping", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(ctx); err != nil {
+		t.Skipf("PostgreSQL Ping failed: %v; skipping", err)
+	}
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+	client := startProdServer(t)
+
+	materializer := state.NewMaterializer(pgStore, client, logger)
+	reconciler := state.NewReconciler(pgStore, client, materializer, logger)
+
+	ws := "ws-pg-partial-safety"
+	_ = pgStore.DeleteWorkspaceState(ctx, ws)
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(context.Background(), ws)
+	}()
+
+	frontendSubj := &corev1.ResourceIdentity{
+		Provider:     "kubernetes",
+		ResourceType: "pod",
+		ProviderId:   "payments/frontend",
+	}
+	backendSubj := &corev1.ResourceIdentity{
+		Provider:     "kubernetes",
+		ResourceType: "pod",
+		ProviderId:   "payments/backend",
+	}
+	dbSubj := &corev1.ResourceIdentity{
+		Provider:     "aws",
+		ResourceType: "rds_instance",
+		ProviderId:   "payments/database",
+	}
+
+	// Initial sweep with 3 resources and 2 relationships:
+	// frontend -[CALLS]-> backend -[CALLS]-> db
+	ev101 := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440101", frontendSubj, "10.0.1.50", 8080)
+	ev102 := makeMappingEvidence("550e8400-e29b-41d4-a716-446655440102", backendSubj, "10.0.1.50", 8080)
+	ev103 := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440103", backendSubj, "10.0.2.10", 5432)
+	ev104 := makeMappingEvidence("550e8400-e29b-41d4-a716-446655440104", dbSubj, "10.0.2.10", 5432)
+
+	batch1 := state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{ev101, ev102, ev103, ev104},
+	}
+	res1, err := reconciler.ReconcileAndMaterialize(ctx, batch1)
+	if err != nil {
+		t.Fatalf("Cycle 1 ReconcileAndMaterialize failed: %v", err)
+	}
+	if res1.ResourcesCreated != 3 || res1.RelationshipsCreated != 2 || res1.ProvenanceLinksAdded != 4 {
+		t.Fatalf("unexpected Cycle 1 result: %+v", res1)
+	}
+
+	// Verify Rust Core Engine impact before partial sweep
+	answerSvc := answer.NewService(client, logger)
+	ansInitial, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
+		WorkspaceID: ws,
+		Target: &answer.ResourceIdentity{
+			Provider:     dbSubj.Provider,
+			ResourceType: dbSubj.ResourceType,
+			ProviderID:   dbSubj.ProviderId,
+		},
+		Direction: "incoming",
+		MaxDepth:  5,
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact failed on initial state: %v", err)
+	}
+	if ansInitial.Summary.ImpactedCount != 2 {
+		t.Errorf("expected 2 impacted resources (frontend and backend) on db, got %d", ansInitial.Summary.ImpactedCount)
+	}
+
+	// Step 2: Run a partial collection that ONLY observes frontend.
+	// Backend and Database are COMPLETELY OMITTED from the collection batch.
+	ev105 := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440105", frontendSubj, "10.0.1.50", 8080)
+	batch2 := state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{ev105},
+	}
+	res2, err := reconciler.ReconcileAndMaterialize(ctx, batch2)
+	if err != nil {
+		t.Fatalf("Cycle 2 Partial ReconcileAndMaterialize failed: %v", err)
+	}
+
+	// 1. Valid observed updates applied
+	if res2.ResourcesCreated != 0 || res2.ResourcesUpdated != 1 {
+		t.Errorf("expected 0 created, 1 updated (frontend); got %+v", res2)
+	}
+
+	// 2. Authoritative PostgreSQL totals preserved (missing observations do NOT delete)
+	if res2.ResourcesTotal != 3 {
+		t.Errorf("expected 3 total resources preserved in PG, got %d", res2.ResourcesTotal)
+	}
+	if res2.RelationshipsTotal != 2 {
+		t.Errorf("expected 2 total relationships preserved in PG, got %d", res2.RelationshipsTotal)
+	}
+
+	// 3. Verify in PostgreSQL that omitted resources remain intact
+	backendRes, err := pgStore.GetResource(ctx, ws, state.ResourceIdentity{
+		Provider:     backendSubj.Provider,
+		ResourceType: backendSubj.ResourceType,
+		ProviderID:   backendSubj.ProviderId,
+	})
+	if err != nil || backendRes == nil {
+		t.Fatalf("omitted backend resource was deleted or deactivated: %v", err)
+	}
+
+	dbRes, err := pgStore.GetResource(ctx, ws, state.ResourceIdentity{
+		Provider:     dbSubj.Provider,
+		ResourceType: dbSubj.ResourceType,
+		ProviderID:   dbSubj.ProviderId,
+	})
+	if err != nil || dbRes == nil {
+		t.Fatalf("omitted db resource was deleted or deactivated: %v", err)
+	}
+
+	// 4. Verify in PostgreSQL that omitted relationships remain intact
+	rels, err := pgStore.ListRelationships(ctx, ws)
+	if err != nil {
+		t.Fatalf("ListRelationships failed: %v", err)
+	}
+	if len(rels) != 2 {
+		t.Fatalf("expected 2 relationships intact in PG, got %d", len(rels))
+	}
+
+	// 5. Verify historical evidence remains intact (all 4 original + 1 new = 5)
+	evList, err := pgStore.ListEvidence(ctx, ws)
+	if err != nil {
+		t.Fatalf("ListEvidence failed: %v", err)
+	}
+	if len(evList) != 5 {
+		t.Fatalf("historical evidence deleted! expected 5 evidence records in PG, got %d", len(evList))
+	}
+
+	// 6. Verify materialization reflects the authoritative PostgreSQL state
+	// The materialized graph in Rust must still contain the full transitive chain:
+	// frontend -> backend -> database
+	ansAfterPartial, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
+		WorkspaceID: ws,
+		Target: &answer.ResourceIdentity{
+			Provider:     dbSubj.Provider,
+			ResourceType: dbSubj.ResourceType,
+			ProviderID:   dbSubj.ProviderId,
+		},
+		Direction: "incoming",
+		MaxDepth:  5,
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact after partial sweep failed: %v", err)
+	}
+	if ansAfterPartial.Summary.ImpactedCount != 2 {
+		t.Errorf("expected 2 impacted resources preserved in Rust Core Engine, got %d", ansAfterPartial.Summary.ImpactedCount)
+	}
+
+	ansBackend, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
+		WorkspaceID: ws,
+		Target: &answer.ResourceIdentity{
+			Provider:     backendSubj.Provider,
+			ResourceType: backendSubj.ResourceType,
+			ProviderID:   backendSubj.ProviderId,
+		},
+		Direction: "incoming",
+		MaxDepth:  5,
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact on backend after partial sweep failed: %v", err)
+	}
+	if ansBackend.Summary.ImpactedCount != 1 {
+		t.Errorf("expected 1 impacted resource (frontend) on backend in Rust Core Engine, got %d", ansBackend.Summary.ImpactedCount)
+	}
+}
+

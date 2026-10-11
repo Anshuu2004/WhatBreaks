@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -230,7 +231,7 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 			Duration:    duration,
 			DurationMs:  duration.Milliseconds(),
 			Error:       err,
-		}, fmt.Errorf("%w: %v", ErrClusterUnreachable, err)
+		}, fmt.Errorf("%w: %w", ErrClusterUnreachable, err)
 	}
 
 	// Check context cancellation before heavy collection
@@ -250,7 +251,7 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 	}
 
 	// 6. Stage: Observation Collection Sweep
-	evidenceList, err := collector.Collect(ctx)
+	colResult, err := collector.CollectDetailed(ctx)
 	if err != nil {
 		c.logger.Error("Cluster observation collection sweep failed",
 			"workspace_id", wsID,
@@ -259,72 +260,187 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 		)
 		duration := time.Since(start)
 		return &Result{
-			WorkspaceID: wsID,
-			ClusterID:   targetCluster,
-			Trigger:     req.Trigger,
-			RunID:       runID,
-			Status:      "FAILED",
-			Stage:       StageCollection,
-			Duration:    duration,
-			DurationMs:  duration.Milliseconds(),
-			Error:       err,
-		}, fmt.Errorf("%w: %v", ErrCollectionFailed, err)
+			WorkspaceID:       wsID,
+			ClusterID:         targetCluster,
+			Trigger:           req.Trigger,
+			RunID:             runID,
+			Status:            "FAILED",
+			Stage:             StageCollection,
+			Duration:          duration,
+			DurationMs:        duration.Milliseconds(),
+			DatabaseCommitted: false,
+			Error:             err,
+		}, fmt.Errorf("%w: %w", ErrCollectionFailed, err)
+	}
+
+	// Completeness validation: reject incomplete collections with required scope failures.
+	// Preserves persisted PostgreSQL state intact without reconciling an incomplete snapshot.
+	if colResult.HasRequiredFailures() {
+		c.logger.Error("Collection rejected: required discovery scopes failed",
+			"workspace_id", wsID,
+			"cluster_id", targetCluster,
+			"required_failures", colResult.RequiredFailures,
+			"optional_failures", colResult.OptionalFailures,
+			"evidence_count", len(colResult.Evidence),
+		)
+		duration := time.Since(start)
+		return &Result{
+			WorkspaceID:       wsID,
+			ClusterID:         targetCluster,
+			Trigger:           req.Trigger,
+			RunID:             runID,
+			Status:            "FAILED",
+			Stage:             StageCollection,
+			EvidenceCount:     len(colResult.Evidence),
+			Duration:          duration,
+			DurationMs:        duration.Milliseconds(),
+			DatabaseCommitted: false,
+			Collection:        colResult,
+			Error:             ErrRequiredScopeFailed,
+		}, fmt.Errorf("%w: %s", ErrRequiredScopeFailed, strings.Join(colResult.RequiredFailures, ", "))
 	}
 
 	// Check context cancellation before reconciliation
 	if err := ctx.Err(); err != nil {
 		duration := time.Since(start)
 		return &Result{
-			WorkspaceID:   wsID,
-			ClusterID:     targetCluster,
-			Trigger:       req.Trigger,
-			RunID:         runID,
-			Status:        "FAILED",
-			Stage:         StageCollection,
-			EvidenceCount: len(evidenceList),
-			Duration:      duration,
-			DurationMs:    duration.Milliseconds(),
-			Error:         err,
+			WorkspaceID:       wsID,
+			ClusterID:         targetCluster,
+			Trigger:           req.Trigger,
+			RunID:             runID,
+			Status:            "FAILED",
+			Stage:             StageCollection,
+			EvidenceCount:     len(colResult.Evidence),
+			Duration:          duration,
+			DurationMs:        duration.Milliseconds(),
+			DatabaseCommitted: false,
+			Collection:        colResult,
+			Error:             err,
 		}, err
 	}
 
 	// 7. Stage: Reconciliation & Materialization
 	batch := state.ObservationBatch{
 		WorkspaceID: wsID,
-		Evidence:    evidenceList,
+		Evidence:    colResult.Evidence,
+		Scope: &state.ScopeBoundary{
+			Provider:  "kubernetes",
+			ScopeType: "cluster",
+			ScopeID:   targetCluster,
+			Complete:  colResult.Complete,
+		},
 	}
 
 	recResult, err := c.reconciler.ReconcileAndMaterialize(ctx, batch)
 	if err != nil {
-		duration := time.Since(start)
 		stage := StageReconciliation
 		errType := ErrReconciliationFailed
+		dbCommitted := false
 
-		// Differentiate materialization failure from database reconciliation failure
-		errMsg := strings.ToLower(err.Error())
-		if strings.Contains(errMsg, "materializ") {
+		if recResult != nil {
 			stage = StageMaterialization
 			errType = ErrMaterializationFailed
+			dbCommitted = true
+
+			// Materialization Recovery: PostgreSQL commit succeeded!
+			// Attempt bounded recovery retry to rematerialize state into Core Engine.
+			var matErr error = err
+			for attempt := 1; attempt <= 2; attempt++ {
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					if ctx.Err() != nil {
+						matErr = ctx.Err()
+					}
+					break
+				}
+				c.logger.Warn("Retrying state rematerialization after transient failure",
+					"workspace_id", wsID,
+					"cluster_id", targetCluster,
+					"attempt", attempt,
+				)
+				select {
+				case <-time.After(50 * time.Millisecond * time.Duration(attempt)):
+				case <-ctx.Done():
+					matErr = ctx.Err()
+					break
+				}
+				if ctx.Err() != nil {
+					matErr = ctx.Err()
+					break
+				}
+				if retryErr := c.reconciler.Rematerialize(ctx, wsID); retryErr == nil {
+					c.logger.Info("Materialization recovered successfully on retry",
+						"workspace_id", wsID,
+						"cluster_id", targetCluster,
+						"attempt", attempt,
+					)
+					matErr = nil
+					break
+				} else {
+					matErr = retryErr
+				}
+			}
+
+			if matErr == nil {
+				// Successfully recovered on retry!
+				status := "COMPLETED"
+				if !colResult.Complete || recResult.ConflictsCount > 0 || recResult.InsufficientCount > 0 {
+					status = "PARTIAL"
+				}
+				c.logger.Info("Discovery sweep and materialization recovered and completed",
+					"workspace_id", wsID,
+					"cluster_id", targetCluster,
+					"status", status,
+					"evidence_count", len(colResult.Evidence),
+				)
+				duration := time.Since(start)
+				return &Result{
+					WorkspaceID:          wsID,
+					ClusterID:            targetCluster,
+					Trigger:              req.Trigger,
+					RunID:                runID,
+					Status:               status,
+					Stage:                StageCompleted,
+					EvidenceCount:        len(colResult.Evidence),
+					ResourcesCreated:     recResult.ResourcesCreated,
+					ResourcesUpdated:     recResult.ResourcesUpdated,
+					ResourcesTotal:       recResult.ResourcesTotal,
+					RelationshipsCreated: recResult.RelationshipsCreated,
+					RelationshipsUpdated: recResult.RelationshipsUpdated,
+					RelationshipsTotal:   recResult.RelationshipsTotal,
+					ConflictsCount:       recResult.ConflictsCount,
+					Duration:             duration,
+					DurationMs:           duration.Milliseconds(),
+					DatabaseCommitted:    true,
+					Collection:           colResult,
+				}, nil
+			}
+
+			// Retries exhausted
+			err = matErr
 		}
 
+		duration := time.Since(start)
 		c.logger.Error("State reconciliation and materialization failed",
 			"workspace_id", wsID,
 			"cluster_id", targetCluster,
 			"stage", stage,
+			"database_committed", dbCommitted,
 			"error", err.Error(),
 		)
 
 		res := &Result{
-			WorkspaceID:   wsID,
-			ClusterID:     targetCluster,
-			Trigger:       req.Trigger,
-			RunID:         runID,
-			Status:        "FAILED",
-			Stage:         stage,
-			EvidenceCount: len(evidenceList),
-			Duration:      duration,
-			DurationMs:    duration.Milliseconds(),
-			Error:         err,
+			WorkspaceID:       wsID,
+			ClusterID:         targetCluster,
+			Trigger:           req.Trigger,
+			RunID:             runID,
+			Status:            "FAILED",
+			Stage:             stage,
+			EvidenceCount:     len(colResult.Evidence),
+			Duration:          duration,
+			DurationMs:        duration.Milliseconds(),
+			DatabaseCommitted: dbCommitted,
+			Collection:        colResult,
+			Error:             err,
 		}
 		if recResult != nil {
 			res.ResourcesCreated = recResult.ResourcesCreated
@@ -335,13 +451,13 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 			res.RelationshipsTotal = recResult.RelationshipsTotal
 			res.ConflictsCount = recResult.ConflictsCount
 		}
-		return res, fmt.Errorf("%w: %v", errType, err)
+		return res, fmt.Errorf("%w: %w", errType, err)
 	}
 
 	// 8. Stage: Completed
 	duration := time.Since(start)
 	status := "COMPLETED"
-	if recResult.ConflictsCount > 0 || recResult.InsufficientCount > 0 {
+	if !colResult.Complete || recResult.ConflictsCount > 0 || recResult.InsufficientCount > 0 {
 		status = "PARTIAL"
 	}
 
@@ -349,7 +465,8 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 		"workspace_id", wsID,
 		"cluster_id", targetCluster,
 		"status", status,
-		"evidence_count", len(evidenceList),
+		"complete", colResult.Complete,
+		"evidence_count", len(colResult.Evidence),
 		"resources_total", recResult.ResourcesTotal,
 		"duration_ms", duration.Milliseconds(),
 	)
@@ -361,7 +478,7 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 		RunID:                runID,
 		Status:               status,
 		Stage:                StageCompleted,
-		EvidenceCount:        len(evidenceList),
+		EvidenceCount:        len(colResult.Evidence),
 		ResourcesCreated:     recResult.ResourcesCreated,
 		ResourcesUpdated:     recResult.ResourcesUpdated,
 		ResourcesTotal:       recResult.ResourcesTotal,
@@ -371,5 +488,26 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 		ConflictsCount:       recResult.ConflictsCount,
 		Duration:             duration,
 		DurationMs:           duration.Milliseconds(),
+		DatabaseCommitted:    true,
+		Collection:           colResult,
 	}, nil
+}
+
+// Rematerialize triggers an on-demand state reload from PostgreSQL into the Core Engine for workspaceID.
+func (c *DefaultCoordinator) Rematerialize(ctx context.Context, workspaceID string) error {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return ErrWorkspaceRequired
+	}
+
+	c.mu.Lock()
+	rec := c.reconciler
+	c.mu.Unlock()
+
+	if rec == nil {
+		return ErrReconcilerUnavailable
+	}
+
+	c.logger.Info("Triggering on-demand state rematerialization", "workspace_id", ws)
+	return rec.Rematerialize(ctx, ws)
 }

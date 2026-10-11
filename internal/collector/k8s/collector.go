@@ -3,11 +3,15 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/coreclient"
+	"github.com/aaradhychinche-alt/WhatBreaks/internal/discovery"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/lifecycle"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/logging"
 )
@@ -33,6 +37,7 @@ type Collector struct {
 	reconcileInterval time.Duration
 	normalizer        *Normalizer
 	tracker           *lifecycle.SimpleTracker
+	scopePolicy       *ScopePolicy
 
 	mu            sync.RWMutex
 	running       bool
@@ -51,10 +56,15 @@ func New(opts ...Option) (*Collector, error) {
 		reconcileInterval: 30 * time.Second,
 		tracker:           lifecycle.NewSimpleTracker(),
 		stopCh:            make(chan struct{}),
+		scopePolicy:       DefaultScopePolicy(),
 	}
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	if c.scopePolicy == nil {
+		c.scopePolicy = DefaultScopePolicy()
 	}
 
 	if c.client == nil {
@@ -211,27 +221,82 @@ func (c *Collector) Ping(ctx context.Context) error {
 
 // Collect executes a complete read-only sweep of Kubernetes infrastructure,
 // returning normalized, immutable WhatBreaks Evidence records.
+// If any required scope fails, Collect returns the gathered evidence alongside ErrRequiredScopeFailed.
 func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
+	colResult, err := c.CollectDetailed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if colResult.HasRequiredFailures() {
+		return colResult.Evidence, fmt.Errorf("%w: %s", discovery.ErrRequiredScopeFailed, strings.Join(colResult.RequiredFailures, ", "))
+	}
+	return colResult.Evidence, nil
+}
+
+// CollectDetailed executes an infrastructure discovery sweep and returns structured telemetry
+// distinguishing complete, partial, and failed scope collections.
+func (c *Collector) CollectDetailed(ctx context.Context) (*discovery.CollectionResult, error) {
 	c.mu.RLock()
 	if c.stopped {
 		c.mu.RUnlock()
 		return nil, ErrCollectorStopped
 	}
+	policy := c.scopePolicy
+	if policy == nil {
+		policy = DefaultScopePolicy()
+	}
 	c.mu.RUnlock()
 
-	var evidenceList []*corev1.Evidence
-	var collectErr error
+	var colResult *discovery.CollectionResult
 
 	err := c.tracker.TrackWork(ctx, "k8s-collect-sweep", func(trackCtx context.Context) error {
 		var allEvidence []*corev1.Evidence
+		successfulScopesMap := make(map[string]bool)
+		failedScopesMap := make(map[string]bool)
+		var scopeErrors []discovery.ScopeError
+
+		recordSuccess := func(scope string) {
+			if !failedScopesMap[scope] {
+				successfulScopesMap[scope] = true
+			}
+		}
+
+		recordFailure := func(scope string, resource string, err error) {
+			failedScopesMap[scope] = true
+			delete(successfulScopesMap, scope)
+			isRequired := policy.IsRequired(scope)
+			scopeErrors = append(scopeErrors, discovery.ScopeError{
+				Scope:    scope,
+				Resource: resource,
+				Error:    err.Error(),
+				Required: isRequired,
+			})
+			c.logger.Warn("Failed to list Kubernetes resource scope",
+				"scope", scope,
+				"resource", resource,
+				"required", isRequired,
+				"error", err.Error(),
+			)
+		}
+
+		isContextErr := func(err error) bool {
+			return trackCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		}
 
 		// 1. Cluster-scoped resources (if ClusterWide is enabled)
 		if c.clusterWide {
 			// Namespaces
 			namespaces, err := c.client.ListNamespaces(trackCtx)
 			if err != nil {
-				c.logger.Warn("Failed to list namespaces", "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeNamespaces, "Namespace", err)
 			} else {
+				recordSuccess(ScopeNamespaces)
 				for i := range namespaces {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeNamespace(&namespaces[i])...)
 				}
@@ -240,8 +305,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// Nodes
 			nodes, err := c.client.ListNodes(trackCtx)
 			if err != nil {
-				c.logger.Warn("Failed to list nodes", "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeNodes, "Node", err)
 			} else {
+				recordSuccess(ScopeNodes)
 				for i := range nodes {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeNode(&nodes[i])...)
 				}
@@ -250,8 +322,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// PersistentVolumes
 			pvs, err := c.client.ListPVs(trackCtx)
 			if err != nil {
-				c.logger.Warn("Failed to list persistent volumes", "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopePersistentVolumes, "PersistentVolume", err)
 			} else {
+				recordSuccess(ScopePersistentVolumes)
 				for i := range pvs {
 					allEvidence = append(allEvidence, c.normalizer.NormalizePV(&pvs[i])...)
 				}
@@ -276,8 +355,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// Deployments
 			deployments, err := c.client.ListDeployments(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list deployments", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeDeployments, fmt.Sprintf("Deployment (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeDeployments)
 				for i := range deployments {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeDeployment(&deployments[i])...)
 				}
@@ -286,8 +372,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// ReplicaSets
 			replicaSets, err := c.client.ListReplicaSets(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list replica sets", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeReplicaSets, fmt.Sprintf("ReplicaSet (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeReplicaSets)
 				for i := range replicaSets {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeReplicaSet(&replicaSets[i])...)
 				}
@@ -296,8 +389,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// Services
 			services, err := c.client.ListServices(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list services", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeServices, fmt.Sprintf("Service (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeServices)
 				for i := range services {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeService(&services[i])...)
 				}
@@ -306,8 +406,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// Ingresses
 			ingresses, err := c.client.ListIngresses(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list ingresses", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeIngresses, fmt.Sprintf("Ingress (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeIngresses)
 				for i := range ingresses {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeIngress(&ingresses[i])...)
 				}
@@ -316,8 +423,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// Pods
 			pods, err := c.client.ListPods(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list pods", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopePods, fmt.Sprintf("Pod (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopePods)
 				for i := range pods {
 					allEvidence = append(allEvidence, c.normalizer.NormalizePod(&pods[i])...)
 				}
@@ -326,8 +440,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// ConfigMaps
 			configMaps, err := c.client.ListConfigMaps(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list config maps", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeConfigMaps, fmt.Sprintf("ConfigMap (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeConfigMaps)
 				for i := range configMaps {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeConfigMap(&configMaps[i])...)
 				}
@@ -336,8 +457,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// ServiceAccounts
 			serviceAccounts, err := c.client.ListServiceAccounts(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list service accounts", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeServiceAccounts, fmt.Sprintf("ServiceAccount (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeServiceAccounts)
 				for i := range serviceAccounts {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeServiceAccount(&serviceAccounts[i])...)
 				}
@@ -346,8 +474,15 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// Secrets (METADATA ONLY - SECRET SAFETY GUARANTEE)
 			secrets, err := c.client.ListSecretsMetadata(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list secret metadata", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeSecrets, fmt.Sprintf("SecretMetadata (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopeSecrets)
 				for i := range secrets {
 					allEvidence = append(allEvidence, c.normalizer.NormalizeSecret(&secrets[i])...)
 				}
@@ -356,23 +491,69 @@ func (c *Collector) Collect(ctx context.Context) ([]*corev1.Evidence, error) {
 			// PVCs
 			pvcs, err := c.client.ListPVCs(trackCtx, ns)
 			if err != nil {
-				c.logger.Warn("Failed to list PVCs", "namespace", ns, "error", err.Error())
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopePersistentVolumeClaims, fmt.Sprintf("PersistentVolumeClaim (namespace: %q)", ns), err)
 			} else {
+				recordSuccess(ScopePersistentVolumeClaims)
 				for i := range pvcs {
 					allEvidence = append(allEvidence, c.normalizer.NormalizePVC(&pvcs[i])...)
 				}
 			}
 		}
 
-		evidenceList = allEvidence
+		var succScopes []string
+		for s := range successfulScopesMap {
+			succScopes = append(succScopes, s)
+		}
+		sort.Strings(succScopes)
+
+		var failedScopes, reqFailures, optFailures []string
+		for s := range failedScopesMap {
+			failedScopes = append(failedScopes, s)
+			if policy.IsRequired(s) {
+				reqFailures = append(reqFailures, s)
+			} else {
+				optFailures = append(optFailures, s)
+			}
+		}
+		sort.Strings(failedScopes)
+		sort.Strings(reqFailures)
+		sort.Strings(optFailures)
+
+		status := discovery.CollectionStatusComplete
+		complete := true
+		if len(reqFailures) > 0 {
+			status = discovery.CollectionStatusFailed
+			complete = false
+		} else if len(optFailures) > 0 {
+			status = discovery.CollectionStatusPartial
+			complete = false
+		}
+
+		colResult = &discovery.CollectionResult{
+			Evidence:         allEvidence,
+			Status:           status,
+			Complete:         complete,
+			ScopeErrors:      scopeErrors,
+			SuccessfulScopes: succScopes,
+			FailedScopes:     failedScopes,
+			RequiredFailures: reqFailures,
+			OptionalFailures: optFailures,
+		}
+
 		return nil
 	})
 
 	if err != nil {
-		collectErr = err
+		return nil, err
 	}
 
-	return evidenceList, collectErr
+	return colResult, nil
 }
 
 // SubmitToCore sends collected Evidence to the Rust Core Engine DiscoveryService.

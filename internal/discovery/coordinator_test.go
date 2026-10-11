@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,14 +17,15 @@ import (
 
 // mockCollector implements discovery.ClusterCollector for unit testing.
 type mockCollector struct {
-	mu          sync.Mutex
-	clusterID   string
-	workspaceID string
-	pingErr     error
-	collectErr  error
-	evidence    []*corev1.Evidence
-	pingCount   int
-	collectWait chan struct{}
+	mu                    sync.Mutex
+	clusterID             string
+	workspaceID           string
+	pingErr               error
+	collectErr            error
+	collectDetailedResult *discovery.CollectionResult
+	evidence              []*corev1.Evidence
+	pingCount             int
+	collectWait           chan struct{}
 }
 
 func (m *mockCollector) ClusterID() string {
@@ -55,12 +57,40 @@ func (m *mockCollector) Collect(ctx context.Context) ([]*corev1.Evidence, error)
 	return m.evidence, nil
 }
 
+func (m *mockCollector) CollectDetailed(ctx context.Context) (*discovery.CollectionResult, error) {
+	if m.collectWait != nil {
+		select {
+		case <-m.collectWait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if m.collectDetailedResult != nil {
+		return m.collectDetailedResult, m.collectErr
+	}
+	if m.collectErr != nil {
+		return nil, m.collectErr
+	}
+	return &discovery.CollectionResult{
+		Evidence:         m.evidence,
+		Status:           discovery.CollectionStatusComplete,
+		Complete:         true,
+		SuccessfulScopes: []string{"pods", "deployments"},
+	}, nil
+}
+
 // mockReconciler implements state.Reconciler for unit testing.
 type mockReconciler struct {
-	mu           sync.Mutex
-	reconcileErr error
-	reconciled   bool
-	batch        state.ObservationBatch
+	mu                 sync.Mutex
+	reconcileErr       error
+	reconciled         bool
+	batch              state.ObservationBatch
+	rematerialized     bool
+	rematerializeCount int
+	rematerializeErr   error
+	nilResultOnErr     bool
+	onReconcile        func(ctx context.Context)
+	onRematerialize    func(ctx context.Context)
 }
 
 func (m *mockReconciler) Reconcile(ctx context.Context, batch state.ObservationBatch) (*state.ReconciliationResult, error) {
@@ -69,11 +99,33 @@ func (m *mockReconciler) Reconcile(ctx context.Context, batch state.ObservationB
 
 func (m *mockReconciler) ReconcileAndMaterialize(ctx context.Context, batch state.ObservationBatch) (*state.ReconciliationResult, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.reconciled = true
 	m.batch = batch
-	if m.reconcileErr != nil {
-		return nil, m.reconcileErr
+	onRec := m.onReconcile
+	recErr := m.reconcileErr
+	nilOnErr := m.nilResultOnErr
+	m.mu.Unlock()
+
+	if onRec != nil {
+		onRec(ctx)
+	}
+
+	if recErr != nil {
+		// If nilOnErr is requested or error is NOT a materialization error, simulate failure before DB commit
+		if nilOnErr || !strings.Contains(strings.ToLower(recErr.Error()), "materializ") {
+			return nil, recErr
+		}
+		// Otherwise simulate successful DB commit followed by materialization failure
+		return &state.ReconciliationResult{
+			WorkspaceID:          batch.WorkspaceID,
+			EvidenceCount:        len(batch.Evidence),
+			ResourcesCreated:     1,
+			ResourcesUpdated:     2,
+			ResourcesTotal:       3,
+			RelationshipsCreated: 1,
+			RelationshipsTotal:   2,
+			Duration:             5 * time.Millisecond,
+		}, recErr
 	}
 	return &state.ReconciliationResult{
 		WorkspaceID:          batch.WorkspaceID,
@@ -85,6 +137,20 @@ func (m *mockReconciler) ReconcileAndMaterialize(ctx context.Context, batch stat
 		RelationshipsTotal:   2,
 		Duration:             5 * time.Millisecond,
 	}, nil
+}
+
+func (m *mockReconciler) Rematerialize(ctx context.Context, workspaceID string) error {
+	m.mu.Lock()
+	m.rematerialized = true
+	m.rematerializeCount++
+	onRemat := m.onRematerialize
+	rematErr := m.rematerializeErr
+	m.mu.Unlock()
+
+	if onRemat != nil {
+		onRemat(ctx)
+	}
+	return rematErr
 }
 
 func sampleEvidence(id string) *corev1.Evidence {
@@ -339,7 +405,8 @@ func TestCoordinator_Discover_MaterializationFailure(t *testing.T) {
 		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
 	}
 	rec := &mockReconciler{
-		reconcileErr: fmt.Errorf("materializer failed to load state: gRPC unavailable"),
+		reconcileErr:     fmt.Errorf("materializer failed to load state: gRPC unavailable"),
+		rematerializeErr: fmt.Errorf("materializer failed to load state: gRPC unavailable"),
 	}
 
 	coord := discovery.NewCoordinator(
@@ -629,3 +696,572 @@ func TestCoordinator_Discover_MissingDependencies(t *testing.T) {
 		t.Errorf("expected ErrClusterRequired when multiple clusters registered, got: %v", err5)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 12. Phase 4A.1 Collection Completeness Contract Tests
+// ---------------------------------------------------------------------------
+
+func TestCoordinator_Completeness_CompleteCollection_ProceedsToReconciliation(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-complete",
+		workspaceID: wsID,
+		collectDetailedResult: &discovery.CollectionResult{
+			Evidence:         []*corev1.Evidence{sampleEvidence("ev-1")},
+			Status:           discovery.CollectionStatusComplete,
+			Complete:         true,
+			SuccessfulScopes: []string{"pods", "deployments", "services"},
+		},
+	}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-complete",
+	})
+	if err != nil {
+		t.Fatalf("Discover failed: %v", err)
+	}
+
+	if res.Status != "COMPLETED" {
+		t.Errorf("expected status COMPLETED, got %s", res.Status)
+	}
+	if !res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be true")
+	}
+	if !rec.reconciled {
+		t.Errorf("expected reconciliation to be invoked")
+	}
+	if rec.batch.Scope == nil || !rec.batch.Scope.Complete {
+		t.Errorf("expected batch.Scope.Complete to be true for complete collection, got %+v", rec.batch.Scope)
+	}
+}
+
+func TestCoordinator_Completeness_RequiredScopeFailure_BlocksReconciliation(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-required-fail",
+		workspaceID: wsID,
+		collectDetailedResult: &discovery.CollectionResult{
+			Evidence:         []*corev1.Evidence{sampleEvidence("ev-partial-pod")},
+			Status:           discovery.CollectionStatusFailed,
+			Complete:         false,
+			RequiredFailures: []string{"deployments", "services"},
+			ScopeErrors: []discovery.ScopeError{
+				{Scope: "deployments", Resource: "Deployment", Error: "403 Forbidden", Required: true},
+				{Scope: "services", Resource: "Service", Error: "500 Internal", Required: true},
+			},
+		},
+	}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-required-fail",
+	})
+	if err == nil {
+		t.Fatalf("expected error on required scope failure, got nil")
+	}
+	if !errors.Is(err, discovery.ErrRequiredScopeFailed) {
+		t.Errorf("expected ErrRequiredScopeFailed, got: %v", err)
+	}
+
+	if res.Status != "FAILED" {
+		t.Errorf("expected status FAILED, got %s", res.Status)
+	}
+	if res.Stage != discovery.StageCollection {
+		t.Errorf("expected StageCollection, got %s", res.Stage)
+	}
+	if res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be false when reconciliation is blocked")
+	}
+
+	// CRITICAL SAFETY REQUIREMENT: Persisted state intact, reconciler NEVER called
+	if rec.reconciled {
+		t.Fatalf("SAFETY VIOLATION: Reconciler was called despite required scope failure!")
+	}
+}
+
+func TestCoordinator_Completeness_PartialCollection_ReconcilesAsIncomplete(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-optional-fail",
+		workspaceID: wsID,
+		collectDetailedResult: &discovery.CollectionResult{
+			Evidence:         []*corev1.Evidence{sampleEvidence("ev-pod-1")},
+			Status:           discovery.CollectionStatusPartial,
+			Complete:         false,
+			SuccessfulScopes: []string{"pods", "deployments", "services", "secrets", "configmaps", "replicasets"},
+			OptionalFailures: []string{"ingresses", "nodes"},
+			ScopeErrors: []discovery.ScopeError{
+				{Scope: "ingresses", Resource: "Ingress", Error: "404 Not Found", Required: false},
+			},
+		},
+	}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-optional-fail",
+	})
+	if err != nil {
+		t.Fatalf("Discover failed on partial collection: %v", err)
+	}
+
+	if res.Status != "PARTIAL" {
+		t.Errorf("expected status PARTIAL, got %s", res.Status)
+	}
+	if !res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be true")
+	}
+	if !rec.reconciled {
+		t.Errorf("expected reconciler to be called for optional failure")
+	}
+	if rec.batch.Scope == nil || rec.batch.Scope.Complete {
+		t.Errorf("expected batch.Scope.Complete to be false for partial collection, got %+v", rec.batch.Scope)
+	}
+}
+
+func TestCoordinator_Completeness_NonEmptyEvidenceDoesNotInferCompleteness(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	// 50 evidence items collected, but required scope "secrets" failed
+	evidenceSlice := make([]*corev1.Evidence, 50)
+	for i := 0; i < 50; i++ {
+		evidenceSlice[i] = sampleEvidence(fmt.Sprintf("ev-%d", i))
+	}
+
+	col := &mockCollector{
+		clusterID:   "cluster-big-partial",
+		workspaceID: wsID,
+		collectDetailedResult: &discovery.CollectionResult{
+			Evidence:         evidenceSlice,
+			Status:           discovery.CollectionStatusFailed,
+			Complete:         false,
+			RequiredFailures: []string{"secrets"},
+		},
+	}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	_, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-big-partial",
+	})
+	if !errors.Is(err, discovery.ErrRequiredScopeFailed) {
+		t.Fatalf("expected ErrRequiredScopeFailed, got: %v", err)
+	}
+
+	if rec.reconciled {
+		t.Fatalf("reconciler should NOT be called even with 50 evidence records if required scope failed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 13. Phase 4A.1 Materialization Recovery Tests
+// ---------------------------------------------------------------------------
+
+func TestCoordinator_MaterializationRecovery_TransientFailureRecovers(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-mat-retry",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+	// Initial ReconcileAndMaterialize fails at materialization, but Rematerialize retry succeeds
+	rec := &mockReconciler{
+		reconcileErr:     errors.New("materialization failed: connection reset by peer"),
+		rematerializeErr: nil, // Retry will succeed!
+	}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-mat-retry",
+	})
+	if err != nil {
+		t.Fatalf("expected Discover to recover via retry, got: %v", err)
+	}
+
+	if res.Status != "COMPLETED" {
+		t.Errorf("expected status COMPLETED after recovery, got %s", res.Status)
+	}
+	if !res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be true")
+	}
+	if rec.rematerializeCount == 0 {
+		t.Errorf("expected Rematerialize retry to be attempted, count: %d", rec.rematerializeCount)
+	}
+}
+
+func TestCoordinator_MaterializationRecovery_PersistentFailureReportsDatabaseCommitted(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-mat-fail",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+	// Both initial materialization and retries persistently fail
+	rec := &mockReconciler{
+		reconcileErr:     errors.New("materialization failed: core engine down"),
+		rematerializeErr: errors.New("materialization failed: core engine down"),
+	}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-mat-fail",
+	})
+	if err == nil {
+		t.Fatalf("expected error on persistent materialization failure, got nil")
+	}
+	if !errors.Is(err, discovery.ErrMaterializationFailed) {
+		t.Errorf("expected ErrMaterializationFailed, got: %v", err)
+	}
+
+	if res.Status != "FAILED" {
+		t.Errorf("expected status FAILED, got %s", res.Status)
+	}
+	if res.Stage != discovery.StageMaterialization {
+		t.Errorf("expected StageMaterialization, got %s", res.Stage)
+	}
+	// CRITICAL: DB state was committed before materialization failed!
+	if !res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be true when DB succeeded but materialization failed")
+	}
+	if rec.rematerializeCount < 2 {
+		t.Errorf("expected at least 2 recovery retries, got %d", rec.rematerializeCount)
+	}
+}
+
+func TestCoordinator_Rematerialize_Success(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{clusterID: "cluster-1", workspaceID: wsID}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	if err := coord.Rematerialize(context.Background(), wsID); err != nil {
+		t.Fatalf("Rematerialize failed: %v", err)
+	}
+
+	if !rec.rematerialized {
+		t.Errorf("expected reconciler.Rematerialize to be invoked")
+	}
+}
+
+func TestCoordinator_Rematerialize_Validations(t *testing.T) {
+	// 1. Missing workspace
+	coord1 := discovery.NewCoordinator()
+	if err := coord1.Rematerialize(context.Background(), ""); !errors.Is(err, discovery.ErrWorkspaceRequired) {
+		t.Errorf("expected ErrWorkspaceRequired, got: %v", err)
+	}
+
+	// 2. Missing reconciler
+	if err := coord1.Rematerialize(context.Background(), "ws-123"); !errors.Is(err, discovery.ErrReconcilerUnavailable) {
+		t.Errorf("expected ErrReconcilerUnavailable, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 14. Phase 4A.1 Cancellation Tests
+// ---------------------------------------------------------------------------
+
+func TestCoordinator_Cancellation_DuringCollection(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	waitCh := make(chan struct{})
+	col := &mockCollector{
+		clusterID:   "cluster-cancel",
+		workspaceID: wsID,
+		collectWait: waitCh,
+	}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	res, err := coord.Discover(ctx, discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-cancel",
+	})
+
+	if err == nil {
+		t.Fatalf("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, discovery.ErrCollectionFailed) {
+		t.Errorf("expected context.Canceled or ErrCollectionFailed, got: %v", err)
+	}
+	if res == nil || res.Status != "FAILED" {
+		t.Errorf("expected FAILED status on cancellation, got %+v", res)
+	}
+	if rec.reconciled {
+		t.Errorf("reconciler should NOT be called after cancellation during collection")
+	}
+}
+
+func TestCoordinator_Cancellation_BeforeCommit_PreReconciliation(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-cancel-pre-rec",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+	rec := &mockReconciler{}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel before coordinator reaches reconciliation
+	cancel()
+
+	res, err := coord.Discover(ctx, discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-cancel-pre-rec",
+	})
+
+	if err == nil {
+		t.Fatalf("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+	if res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be false on pre-commit cancellation")
+	}
+	if rec.reconciled {
+		t.Errorf("reconciler should NOT be called when context was cancelled before reconciliation")
+	}
+}
+
+func TestCoordinator_Cancellation_BeforeCommit_DuringReconcile(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-cancel-during-rec",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+	// Reconciler fails with cancellation during database transaction (nil result)
+	rec := &mockReconciler{
+		reconcileErr:   context.Canceled,
+		nilResultOnErr: true,
+	}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-cancel-during-rec",
+	})
+
+	if err == nil {
+		t.Fatalf("expected error on reconciliation cancellation, got nil")
+	}
+	if !errors.Is(err, discovery.ErrReconciliationFailed) {
+		t.Errorf("expected ErrReconciliationFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected underlying context.Canceled in error chain, got: %v", err)
+	}
+	if res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be false when cancellation occurs during DB transaction")
+	}
+	if res.Stage != discovery.StageReconciliation {
+		t.Errorf("expected StageReconciliation, got %s", res.Stage)
+	}
+}
+
+func TestCoordinator_Cancellation_ImmediatelyAfterCommit(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-cancel-post-commit",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Reconciler simulates successful DB commit, but context is canceled immediately after commit during materialization
+	rec := &mockReconciler{
+		reconcileErr: fmt.Errorf("materialization failed: %w", context.Canceled),
+		onReconcile: func(c context.Context) {
+			// Cancel context right during/after commit
+			cancel()
+		},
+	}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(ctx, discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-cancel-post-commit",
+	})
+
+	if err == nil {
+		t.Fatalf("expected error on post-commit materialization cancellation, got nil")
+	}
+	if !errors.Is(err, discovery.ErrMaterializationFailed) {
+		t.Errorf("expected ErrMaterializationFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in error chain, got: %v", err)
+	}
+
+	// CRITICAL INVARIANT: A post-commit cancellation is NOT reported as a database rollback!
+	if !res.DatabaseCommitted {
+		t.Fatalf("CRITICAL REGRESSION: DatabaseCommitted must be TRUE when DB committed before cancellation!")
+	}
+	if res.Stage != discovery.StageMaterialization {
+		t.Errorf("expected StageMaterialization, got %s", res.Stage)
+	}
+
+	// CRITICAL INVARIANT: Committed counts remain available after materialization failure
+	if res.ResourcesCreated != 1 || res.ResourcesTotal != 3 {
+		t.Errorf("committed resource counts lost! created: %d, total: %d", res.ResourcesCreated, res.ResourcesTotal)
+	}
+	if res.RelationshipsCreated != 1 || res.RelationshipsTotal != 2 {
+		t.Errorf("committed relationship counts lost! created: %d, total: %d", res.RelationshipsCreated, res.RelationshipsTotal)
+	}
+
+	// CRITICAL INVARIANT: Cancellation stops retries safely (no unbounded retries)
+	if rec.rematerializeCount > 0 {
+		t.Errorf("expected 0 rematerialize retries when context is cancelled, got %d", rec.rematerializeCount)
+	}
+}
+
+func TestCoordinator_Cancellation_DuringMaterializationRetry(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-cancel-retry",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rec := &mockReconciler{
+		reconcileErr:     errors.New("materialization failed: transient network issue"),
+		rematerializeErr: errors.New("materialization failed: still failing"),
+		onRematerialize: func(c context.Context) {
+			// Cancel context during retry
+			cancel()
+		},
+	}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(ctx, discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-cancel-retry",
+	})
+
+	if err == nil {
+		t.Fatalf("expected error on cancelled retry, got nil")
+	}
+	if !errors.Is(err, discovery.ErrMaterializationFailed) {
+		t.Errorf("expected ErrMaterializationFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in error chain, got: %v", err)
+	}
+
+	if !res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be true")
+	}
+	if res.Stage != discovery.StageMaterialization {
+		t.Errorf("expected StageMaterialization, got %s", res.Stage)
+	}
+
+	// Retries must not exceed 1 because cancellation stops further retries
+	if rec.rematerializeCount > 1 {
+		t.Errorf("expected retry loop to halt after cancellation, count was %d", rec.rematerializeCount)
+	}
+}
+
+func TestCoordinator_MaterializationRecovery_RequiresCoreConfirmation(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	col := &mockCollector{
+		clusterID:   "cluster-no-false-success",
+		workspaceID: wsID,
+		evidence:    []*corev1.Evidence{sampleEvidence("ev-1")},
+	}
+	// Initial materialization fails, retry returns an error from Rust Core Engine
+	rec := &mockReconciler{
+		reconcileErr:     errors.New("materialization failed: initial timeout"),
+		rematerializeErr: errors.New("grpc: core engine rejected snapshot with code 13"),
+	}
+
+	coord := discovery.NewCoordinator(
+		discovery.WithCollector(col),
+		discovery.WithReconciler(rec),
+	)
+
+	res, err := coord.Discover(context.Background(), discovery.SyncRequest{
+		WorkspaceID: wsID,
+		ClusterID:   "cluster-no-false-success",
+	})
+
+	if err == nil {
+		t.Fatalf("expected error, got nil (must NOT falsely report success!)")
+	}
+	if !errors.Is(err, discovery.ErrMaterializationFailed) {
+		t.Errorf("expected ErrMaterializationFailed, got: %v", err)
+	}
+	if res.Status != "FAILED" {
+		t.Errorf("expected FAILED status when Core Engine fails to load, got %s", res.Status)
+	}
+	if !res.DatabaseCommitted {
+		t.Errorf("expected DatabaseCommitted to be true")
+	}
+}
+
+

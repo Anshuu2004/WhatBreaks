@@ -22,6 +22,9 @@ type Reconciler interface {
 
 	// ReconcileAndMaterialize reconciles an observation batch and refreshes the Rust Core Engine state.
 	ReconcileAndMaterialize(ctx context.Context, batch ObservationBatch) (*ReconciliationResult, error)
+
+	// Rematerialize loads the complete persisted state for workspaceID and refreshes the Rust Core Engine state.
+	Rematerialize(ctx context.Context, workspaceID string) error
 }
 
 // ReconciliationResult provides detailed lifecycle and state synchronization telemetry.
@@ -458,4 +461,17 @@ func (r *DefaultReconciler) ReconcileAndMaterialize(ctx context.Context, batch O
 	}
 
 	return res, nil
+}
+
+// Rematerialize loads the complete persisted state for workspaceID from Store and materializes it into the Core Engine.
+func (r *DefaultReconciler) Rematerialize(ctx context.Context, workspaceID string) error {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return ErrEmptyWorkspace
+	}
+	if r.materializer == nil {
+		return fmt.Errorf("reconciler: materializer is not configured")
+	}
+	_, err := r.materializer.Materialize(ctx, ws)
+	return err
 }

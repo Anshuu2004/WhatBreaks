@@ -646,3 +646,111 @@ func TestReconciler_ConcurrentReconciliation(t *testing.T) {
 		t.Errorf("expected %d evidence records, got %d", numWorkers, len(evidence))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 11. PARTIAL COLLECTION SAFETY (RESOURCES, RELATIONSHIPS, EVIDENCE PRESERVED)
+// ---------------------------------------------------------------------------
+
+func TestReconciler_PartialCollectionSafety_MemoryStore(t *testing.T) {
+	t0 := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	ev1 := newTestEvidence("ev-safe-1", "kubernetes", "pod", "default/fe", "RUNTIME_CONNECTION", `{"call":"be"}`, t0)
+	ev2 := newTestEvidence("ev-safe-2", "kubernetes", "pod", "default/be", "RUNTIME_CONNECTION", `{"port":8080}`, t0)
+
+	relProto := &corev1.Relationship{
+		Source: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderId:   "default/fe",
+		},
+		Target: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderId:   "default/be",
+		},
+		Kind:     "CALLS",
+		Category: "Invocation",
+	}
+
+	mockDisc := &mockDiscoveryRunner{
+		resp: &corev1.RunDiscoveryResponse{
+			Results: []*corev1.DiscoveryResult{
+				{
+					Outcome: &corev1.DiscoveryResult_Discovered{
+						Discovered: &corev1.DiscoveredRelationship{
+							Relationship:          relProto,
+							SupportingEvidenceIds: []string{ev1.Id, ev2.Id},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	store := state.NewMemoryStore()
+	reconciler := state.NewReconciler(store, mockDisc, nil, nil)
+	ctx := context.Background()
+	ws := "ws-partial-safe-mem"
+
+	// 1. Initial collection sweep: fe and be observed, rel derived
+	res1, err := reconciler.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{ev1, ev2},
+	})
+	if err != nil {
+		t.Fatalf("initial Reconcile failed: %v", err)
+	}
+	if res1.ResourcesCreated != 2 || res1.RelationshipsCreated != 1 {
+		t.Fatalf("unexpected initial reconcile result: %+v", res1)
+	}
+
+	// 2. Partial collection sweep: be omitted entirely, fe observed with new evidence
+	t1 := t0.Add(10 * time.Minute)
+	ev3 := newTestEvidence("ev-safe-3", "kubernetes", "pod", "default/fe", "RUNTIME_CONNECTION", `{"call":"other"}`, t1)
+	// mock discovery returns nothing for this isolated fe evidence
+	mockDiscEmpty := &mockDiscoveryRunner{
+		resp: &corev1.RunDiscoveryResponse{Results: nil},
+	}
+	reconcilerPartial := state.NewReconciler(store, mockDiscEmpty, nil, nil)
+
+	res2, err := reconcilerPartial.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{ev3},
+	})
+	if err != nil {
+		t.Fatalf("partial Reconcile failed: %v", err)
+	}
+
+	// Invariant 1: Valid observed update applied to fe
+	if res2.ResourcesCreated != 0 || res2.ResourcesUpdated != 1 {
+		t.Errorf("expected 0 created, 1 updated; got %+v", res2)
+	}
+
+	// Invariant 2 & 3: Omitted resources and relationships NOT deleted
+	if res2.ResourcesTotal != 2 {
+		t.Errorf("expected 2 total resources preserved, got %d", res2.ResourcesTotal)
+	}
+	if res2.RelationshipsTotal != 1 {
+		t.Errorf("expected 1 total relationship preserved, got %d", res2.RelationshipsTotal)
+	}
+
+	beRes, err := store.GetResource(ctx, ws, state.ResourceIdentity{
+		Provider:     "kubernetes",
+		ResourceType: "pod",
+		ProviderID:   "default/be",
+	})
+	if err != nil || beRes == nil {
+		t.Fatalf("omitted resource default/be was deleted or not found: %v", err)
+	}
+
+	rels, err := store.ListRelationships(ctx, ws)
+	if err != nil || len(rels) != 1 {
+		t.Fatalf("omitted relationship was deleted! err: %v, rels: %+v", err, rels)
+	}
+
+	// Invariant 4: Historical evidence intact (ev-safe-1, ev-safe-2, ev-safe-3)
+	evList, err := store.ListEvidence(ctx, ws)
+	if err != nil || len(evList) != 3 {
+		t.Fatalf("historical evidence lost! expected 3, got %d", len(evList))
+	}
+}
+

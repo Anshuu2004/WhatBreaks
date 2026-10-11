@@ -27,8 +27,14 @@ var (
 	// ErrClusterUnreachable indicates the cluster failed the connectivity reachability check.
 	ErrClusterUnreachable = errors.New("cluster reachability check failed")
 
-	// ErrCollectionFailed indicates observation collection failed.
+	// ErrCollectionFailed indicates observation collection failed fatally.
 	ErrCollectionFailed = errors.New("failed to collect observations from cluster")
+
+	// ErrRequiredScopeFailed indicates one or more required discovery scopes failed during collection.
+	ErrRequiredScopeFailed = errors.New("required discovery scopes failed")
+
+	// ErrCollectionIncomplete indicates observation collection was incomplete.
+	ErrCollectionIncomplete = errors.New("observation collection incomplete")
 
 	// ErrReconciliationFailed indicates reconciling observations with state failed.
 	ErrReconciliationFailed = errors.New("failed to reconcile observations")

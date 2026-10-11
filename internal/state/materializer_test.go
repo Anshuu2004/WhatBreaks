@@ -163,3 +163,95 @@ func TestMaterializer_Errors(t *testing.T) {
 		}
 	})
 }
+
+func TestMaterializer_FreshAuthoritativeSnapshotOnSubsequentCalls(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	ws := "ws-fresh-snapshot"
+
+	res1 := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderID:   "svc-1",
+		},
+	}
+	_ = store.SaveResources(ctx, ws, []state.Resource{res1})
+
+	loader := &mockCoreLoader{}
+	mat := state.NewMaterializer(store, loader, nil)
+
+	// First materialization
+	_, err := mat.Materialize(ctx, ws)
+	if err != nil {
+		t.Fatalf("first Materialize failed: %v", err)
+	}
+	if loader.callCount != 1 {
+		t.Errorf("expected callCount 1, got %d", loader.callCount)
+	}
+	if len(loader.lastReq.Relationships) != 0 {
+		t.Errorf("expected 0 relationships in first call")
+	}
+
+	// Update authoritative store with a new relationship
+	rel1 := state.Relationship{
+		WorkspaceID: ws,
+		Source:      res1.Identity,
+		Target: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderID:   "svc-2",
+		},
+		Category: "network",
+		Kind:     "routes_to",
+	}
+	_ = store.SaveRelationships(ctx, ws, []state.Relationship{rel1})
+
+	// Second materialization (e.g. recovery retry or next cycle): MUST load fresh state from store!
+	_, err = mat.Materialize(ctx, ws)
+	if err != nil {
+		t.Fatalf("second Materialize failed: %v", err)
+	}
+	if loader.callCount != 2 {
+		t.Errorf("expected callCount 2, got %d", loader.callCount)
+	}
+	if len(loader.lastReq.Relationships) != 1 {
+		t.Fatalf("expected fresh snapshot with 1 relationship, got %d", len(loader.lastReq.Relationships))
+	}
+	if loader.lastReq.Relationships[0].Target.ProviderId != "svc-2" {
+		t.Errorf("expected updated relationship to svc-2, got %s", loader.lastReq.Relationships[0].Target.ProviderId)
+	}
+}
+
+func TestReconciler_Rematerialize_Validation(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+
+	// 1. Empty workspace
+	recNoMat := state.NewReconciler(store, nil, nil, nil)
+	if err := recNoMat.Rematerialize(ctx, ""); !errors.Is(err, state.ErrEmptyWorkspace) {
+		t.Errorf("expected ErrEmptyWorkspace for empty string, got: %v", err)
+	}
+	if err := recNoMat.Rematerialize(ctx, "   "); !errors.Is(err, state.ErrEmptyWorkspace) {
+		t.Errorf("expected ErrEmptyWorkspace for whitespace, got: %v", err)
+	}
+
+	// 2. Unconfigured materializer
+	if err := recNoMat.Rematerialize(ctx, "ws-1"); err == nil {
+		t.Errorf("expected error when materializer is unconfigured, got nil")
+	}
+
+	// 3. Configured materializer
+	loader := &mockCoreLoader{}
+	mat := state.NewMaterializer(store, loader, nil)
+	recWithMat := state.NewReconciler(store, nil, mat, nil)
+
+	if err := recWithMat.Rematerialize(ctx, "ws-1"); err != nil {
+		t.Fatalf("expected successful Rematerialize, got: %v", err)
+	}
+	if loader.callCount != 1 {
+		t.Errorf("expected 1 call to CoreLoader, got %d", loader.callCount)
+	}
+}
+

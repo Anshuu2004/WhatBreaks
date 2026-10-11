@@ -100,6 +100,12 @@ func (s *Server) handleDiscoverySync(_ ...*DiscoverySyncManager) http.HandlerFun
 					"error", err,
 				)
 				writeErrorResponse(w, http.StatusBadGateway, "Failed to collect observations from Kubernetes cluster", "DISCOVERY_FAILED")
+			case errors.Is(err, discovery.ErrRequiredScopeFailed), errors.Is(err, discovery.ErrCollectionIncomplete):
+				s.logger.Error("Kubernetes collection incomplete: required scopes failed",
+					"workspace_id", wsID,
+					"error", err,
+				)
+				writeErrorResponse(w, http.StatusBadGateway, "Required Kubernetes discovery scopes failed: "+err.Error(), "COLLECTION_INCOMPLETE")
 			case errors.Is(err, discovery.ErrReconciliationFailed), errors.Is(err, discovery.ErrMaterializationFailed):
 				s.logger.Error("Reconciliation and materialization failed",
 					"workspace_id", wsID,
