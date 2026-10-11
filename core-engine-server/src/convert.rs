@@ -164,6 +164,7 @@ pub fn proto_to_relationship(p: proto::Relationship) -> Result<Relationship, Sta
         "OWNS" => Some(wb_core_engine::relationship::RelationshipCategory::Ownership),
         "RUNS_ON" => Some(wb_core_engine::relationship::RelationshipCategory::Placement),
         "AUTHORIZES" => Some(wb_core_engine::relationship::RelationshipCategory::Authorization),
+        "ROUTES_TO" => Some(wb_core_engine::relationship::RelationshipCategory::Network),
         _ => None,
     };
 

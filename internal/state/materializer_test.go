@@ -59,6 +59,7 @@ func (m *mockCoreLoader) getLastReq() *corev1.LoadStateRequest {
 type hookStore struct {
 	state.Store
 	onLoadAssembledState func(ctx context.Context, workspaceID string)
+	onSaveResources      func(ctx context.Context, workspaceID string, resources []state.Resource)
 }
 
 func (h *hookStore) LoadAssembledState(ctx context.Context, workspaceID string) (*state.AssembledState, error) {
@@ -66,6 +67,14 @@ func (h *hookStore) LoadAssembledState(ctx context.Context, workspaceID string) 
 		h.onLoadAssembledState(ctx, workspaceID)
 	}
 	return h.Store.LoadAssembledState(ctx, workspaceID)
+}
+
+func (h *hookStore) SaveResources(ctx context.Context, workspaceID string, resources []state.Resource) error {
+	err := h.Store.SaveResources(ctx, workspaceID, resources)
+	if h.onSaveResources != nil {
+		h.onSaveResources(ctx, workspaceID, resources)
+	}
+	return err
 }
 
 func TestMaterializer_Materialize_Success(t *testing.T) {
@@ -432,8 +441,32 @@ func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
 		},
 	}
 
-	mat := state.NewMaterializer(baseStore, loader, nil)
-	reconciler := state.NewReconciler(baseStore, nil, mat, nil)
+	bCommittedStore := make(chan struct{}, 1)
+	hStore := &hookStore{
+		Store: baseStore,
+		onSaveResources: func(ctx context.Context, workspaceID string, resources []state.Resource) {
+			if workspaceID == ws {
+				select {
+				case bCommittedStore <- struct{}{}:
+				default:
+				}
+			}
+		},
+	}
+
+	mat := state.NewMaterializer(hStore, loader, nil)
+
+	bWaitingForLock := make(chan struct{}, 1)
+	mat.SetOnLockWait(func(workspaceID string) {
+		if workspaceID == ws {
+			select {
+			case bWaitingForLock <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	reconciler := state.NewReconciler(hStore, nil, mat, nil)
 
 	// Start Materialization A (older state)
 	doneA := make(chan error, 1)
@@ -442,8 +475,13 @@ func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
 		doneA <- err
 	}()
 
-	// Wait until A has loaded State 1 from store and is paused in LoadState
-	<-aInLoadState
+	// Sequence Step a: Operation A reads its database snapshot and pauses before completing
+	// its Rust LoadState operation.
+	select {
+	case <-aInLoadState:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for Operation A to enter LoadState")
+	}
 
 	// Now while A is paused in LoadState, Reconciliation B commits State 2 to PostgreSQL/store
 	// and invokes ReconcileAndMaterialize
@@ -460,26 +498,49 @@ func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
 		doneB <- err
 	}()
 
-	// Give B a moment to commit to store and attempt to acquire materialization lock
-	time.Sleep(20 * time.Millisecond)
+	// Sequence Step b: Operation B completes its newer database reconciliation.
+	select {
+	case <-bCommittedStore:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for Operation B to commit newer state to store")
+	}
 
-	// Now release Materialization A
+	// Sequence Step c: Operation B demonstrably reaches the point where it is waiting for
+	// the same workspace's materialization lock.
+	select {
+	case <-bWaitingForLock:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for Operation B to wait for workspace materialization lock")
+	}
+
+	// Sequence Step d: Operation A is released.
 	close(aRelease)
 
-	if err := <-doneA; err != nil {
-		t.Fatalf("Materialization A failed: %v", err)
-	}
-	if err := <-doneB; err != nil {
-		t.Fatalf("ReconcileAndMaterialize B failed: %v", err)
+	// Sequence Step e: Operation B completes its materialization afterward.
+	select {
+	case err := <-doneA:
+		if err != nil {
+			t.Fatalf("Materialization A failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for Materialization A to complete")
 	}
 
-	// Verify the final request sent to CoreLoader
+	select {
+	case err := <-doneB:
+		if err != nil {
+			t.Fatalf("ReconcileAndMaterialize B failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for ReconcileAndMaterialize B to complete")
+	}
+
+	// Sequence Step f: The final Rust state contains the newer state from B.
 	lastReq := loader.getLastReq()
 	if lastReq == nil {
 		t.Fatalf("expected lastReq to be non-nil")
 	}
 
-	// In the final state, pod-v2 MUST be present because B read the fresh snapshot after A finished!
 	hasPodV2 := false
 	for _, ev := range lastReq.Evidence {
 		if ev.Subject != nil && ev.Subject.ProviderId == "pod-v2" {

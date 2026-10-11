@@ -756,3 +756,383 @@ func TestNegative_ZeroSecretCustody(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizer_EndpointSlice_BasicAndReadiness(t *testing.T) {
+	norm := NewNormalizer("prod-cluster", "ws-1", "k8s-collector")
+	ready := true
+	serving := true
+	terminating := false
+	portName := "http"
+	portNum := int32(80)
+	proto := "TCP"
+
+	slice := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "web-svc-slice-1",
+			Namespace: "production",
+			Labels: map[string]string{
+				"kubernetes.io/service-name": "web-svc",
+			},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses: []string{"10.244.0.15"},
+				Conditions: EndpointConditions{
+					Ready:       &ready,
+					Serving:     &serving,
+					Terminating: &terminating,
+				},
+				TargetRef: &ObjectReference{
+					Kind:      "Pod",
+					Namespace: "production",
+					Name:      "web-pod-abc",
+				},
+			},
+		},
+		Ports: []EndpointPort{
+			{
+				Name:     &portName,
+				Port:     &portNum,
+				Protocol: &proto,
+			},
+		},
+	}
+
+	evs := norm.NormalizeEndpointSlice(slice)
+	if len(evs) != 2 {
+		t.Fatalf("expected 2 evidence records (1 CONFIGURATION, 1 RESOURCE_REFERENCE), got %d", len(evs))
+	}
+
+	// 1. CONFIGURATION on EndpointSlice subject
+	cfgEv := evs[0]
+	if cfgEv.ObservationType != ObservationConfiguration {
+		t.Errorf("expected CONFIGURATION, got %s", cfgEv.ObservationType)
+	}
+	if cfgEv.Subject.ResourceType != TypeEndpointSlice || cfgEv.Subject.ProviderId != "prod-cluster/production/web-svc-slice-1" {
+		t.Errorf("unexpected cfg subject: %v", cfgEv.Subject)
+	}
+
+	// 2. RESOURCE_REFERENCE on Service subject
+	refEv := evs[1]
+	if refEv.ObservationType != ObservationResourceReference {
+		t.Errorf("expected RESOURCE_REFERENCE, got %s", refEv.ObservationType)
+	}
+	if refEv.Subject.ResourceType != TypeService || refEv.Subject.ProviderId != "prod-cluster/production/web-svc" {
+		t.Errorf("unexpected ref subject: %v", refEv.Subject)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(refEv.Data, &data); err != nil {
+		t.Fatalf("failed to unmarshal ref data: %v", err)
+	}
+
+	if data["reference_type"] != "endpoint_slice_member" {
+		t.Errorf("expected endpoint_slice_member, got %v", data["reference_type"])
+	}
+	if data["is_routing"] != true {
+		t.Errorf("expected is_routing true, got %v", data["is_routing"])
+	}
+	if data["ready"] != true {
+		t.Errorf("expected ready true, got %v", data["ready"])
+	}
+	if data["serving"] != true {
+		t.Errorf("expected serving true, got %v", data["serving"])
+	}
+	if data["terminating"] != false {
+		t.Errorf("expected terminating false, got %v", data["terminating"])
+	}
+
+	// Verify target points to Pod
+	targetMap, ok := data["target"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected target object in data")
+	}
+	if targetMap["resource_type"] != "pod" || targetMap["provider_id"] != "prod-cluster/production/web-pod-abc" {
+		t.Errorf("unexpected target identity: %v", targetMap)
+	}
+
+	// Never emit CALLS
+	for _, ev := range evs {
+		if ev.ObservationType == "CALLS" || string(ev.Data) == "CALLS" {
+			t.Errorf("SAFETY VIOLATION: EndpointSlice emitted CALLS observation!")
+		}
+	}
+}
+
+func TestNormalizer_EndpointSlice_UnreadyAndTerminatingPolicy(t *testing.T) {
+	norm := NewNormalizer("prod-cluster", "ws-1", "k8s-collector")
+	falseVal := false
+	trueVal := true
+
+	// Case 1: Unready endpoint
+	sliceUnready := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "unready-slice",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "my-svc"},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses: []string{"10.244.0.21"},
+				Conditions: EndpointConditions{
+					Ready:       &falseVal,
+					Serving:     &falseVal,
+					Terminating: &falseVal,
+				},
+				TargetRef: &ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod-unready"},
+			},
+		},
+	}
+
+	evsUnready := norm.NormalizeEndpointSlice(sliceUnready)
+	if len(evsUnready) != 2 {
+		t.Fatalf("expected 2 evidence records, got %d", len(evsUnready))
+	}
+	var dataUnready map[string]any
+	_ = json.Unmarshal(evsUnready[1].Data, &dataUnready)
+	if dataUnready["is_routing"] != false {
+		t.Errorf("expected is_routing false for unready endpoint, got %v", dataUnready["is_routing"])
+	}
+	if dataUnready["ready"] != false {
+		t.Errorf("expected ready condition preserved as false, got %v", dataUnready["ready"])
+	}
+
+	// Case 2: Terminating endpoint (even if ready=true)
+	sliceTerminating := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "term-slice",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "my-svc"},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses: []string{"10.244.0.22"},
+				Conditions: EndpointConditions{
+					Ready:       &trueVal,
+					Serving:     &trueVal,
+					Terminating: &trueVal,
+				},
+				TargetRef: &ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod-terminating"},
+			},
+		},
+	}
+
+	evsTerm := norm.NormalizeEndpointSlice(sliceTerminating)
+	var dataTerm map[string]any
+	_ = json.Unmarshal(evsTerm[1].Data, &dataTerm)
+	if dataTerm["is_routing"] != false {
+		t.Errorf("expected is_routing false for terminating endpoint, got %v", dataTerm["is_routing"])
+	}
+	if dataTerm["terminating"] != true {
+		t.Errorf("expected terminating condition preserved as true, got %v", dataTerm["terminating"])
+	}
+
+	// Case 3: Service.spec.publishNotReadyAddresses = true enables routing for unready endpoints
+	slicePublishNotReady := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "publish-unready-slice",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "my-svc"},
+			Annotations: map[string]string{
+				// Annotation present to verify that it does NOT override or take precedence
+				"service.kubernetes.io/publish-not-ready-addresses": "true",
+			},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses: []string{"10.244.0.23"},
+				Conditions: EndpointConditions{
+					Ready:       &falseVal,
+					Serving:     &falseVal,
+					Terminating: &falseVal,
+				},
+				TargetRef: &ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod-dns"},
+			},
+		},
+	}
+
+	// 3a. When Service.spec.publishNotReadyAddresses is true -> is_routing=true
+	svcPublishTrue := &Service{
+		ObjectMeta: ObjectMeta{Name: "my-svc", Namespace: "default"},
+		Spec:       ServiceSpec{PublishNotReadyAddresses: true},
+	}
+	evsPublish := norm.NormalizeEndpointSlice(slicePublishNotReady, svcPublishTrue)
+	var dataPublish map[string]any
+	_ = json.Unmarshal(evsPublish[1].Data, &dataPublish)
+	if dataPublish["is_routing"] != true {
+		t.Errorf("expected is_routing true when Service.spec.publishNotReadyAddresses=true, got %v", dataPublish["is_routing"])
+	}
+	if dataPublish["publish_not_ready_addresses"] != true {
+		t.Errorf("expected publish_not_ready_addresses true in evidence, got %v", dataPublish["publish_not_ready_addresses"])
+	}
+
+	// 3b. When Service.spec.publishNotReadyAddresses is false -> annotation CANNOT override; is_routing=false
+	svcPublishFalse := &Service{
+		ObjectMeta: ObjectMeta{Name: "my-svc", Namespace: "default"},
+		Spec:       ServiceSpec{PublishNotReadyAddresses: false},
+	}
+	evsPublishFalse := norm.NormalizeEndpointSlice(slicePublishNotReady, svcPublishFalse)
+	var dataPublishFalse map[string]any
+	_ = json.Unmarshal(evsPublishFalse[1].Data, &dataPublishFalse)
+	if dataPublishFalse["is_routing"] != false {
+		t.Errorf("expected is_routing false when Service.spec.publishNotReadyAddresses=false regardless of slice annotation, got %v", dataPublishFalse["is_routing"])
+	}
+	if dataPublishFalse["publish_not_ready_addresses"] != false {
+		t.Errorf("expected publish_not_ready_addresses false when Service spec is false, got %v", dataPublishFalse["publish_not_ready_addresses"])
+	}
+
+	// 3c. When associated Service is nil (unresolved) -> conservative default: is_routing=false
+	evsNoSvc := norm.NormalizeEndpointSlice(slicePublishNotReady, nil)
+	var dataNoSvc map[string]any
+	_ = json.Unmarshal(evsNoSvc[1].Data, &dataNoSvc)
+	if dataNoSvc["is_routing"] != false {
+		t.Errorf("expected is_routing false when Service is unresolved, got %v", dataNoSvc["is_routing"])
+	}
+	if dataNoSvc["publish_not_ready_addresses"] != false {
+		t.Errorf("expected publish_not_ready_addresses false when Service is unresolved, got %v", dataNoSvc["publish_not_ready_addresses"])
+	}
+
+	// 3d. When Service.spec.publishNotReadyAddresses is true BUT endpoint is terminating -> terminating pods NEVER route
+	sliceTerminatingPublish := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "publish-term-slice",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "my-svc"},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses: []string{"10.244.0.24"},
+				Conditions: EndpointConditions{
+					Ready:       &falseVal,
+					Serving:     &falseVal,
+					Terminating: &trueVal,
+				},
+				TargetRef: &ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod-term"},
+			},
+		},
+	}
+	evsTermPublish := norm.NormalizeEndpointSlice(sliceTerminatingPublish, svcPublishTrue)
+	var dataTermPublish map[string]any
+	_ = json.Unmarshal(evsTermPublish[1].Data, &dataTermPublish)
+	if dataTermPublish["is_routing"] != false {
+		t.Errorf("expected is_routing false for terminating pod even with publishNotReadyAddresses=true, got %v", dataTermPublish["is_routing"])
+	}
+}
+
+func TestNormalizer_EndpointSlice_TargetRefHandling(t *testing.T) {
+	norm := NewNormalizer("prod-cluster", "ws-1", "k8s-collector")
+	ready := true
+
+	// Missing targetRef (e.g. headless or external endpoint)
+	sliceNoTarget := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "ext-slice",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "ext-svc"},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses:  []string{"192.168.1.100"},
+				Conditions: EndpointConditions{Ready: &ready},
+				TargetRef:  nil,
+			},
+		},
+	}
+
+	evsNoTarget := norm.NormalizeEndpointSlice(sliceNoTarget)
+	if len(evsNoTarget) != 2 {
+		t.Fatalf("expected 2 evidence records, got %d", len(evsNoTarget))
+	}
+	var dataNoTarget map[string]any
+	_ = json.Unmarshal(evsNoTarget[1].Data, &dataNoTarget)
+	if dataNoTarget["target"] != nil {
+		t.Errorf("expected target nil, got %v", dataNoTarget["target"])
+	}
+
+	// Non-Pod targetRef (e.g. Node)
+	sliceNodeTarget := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "node-slice",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "node-svc"},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses:  []string{"10.0.0.1"},
+				Conditions: EndpointConditions{Ready: &ready},
+				TargetRef: &ObjectReference{
+					Kind: "Node",
+					Name: "worker-node-1",
+				},
+			},
+		},
+	}
+
+	evsNodeTarget := norm.NormalizeEndpointSlice(sliceNodeTarget)
+	var dataNodeTarget map[string]any
+	_ = json.Unmarshal(evsNodeTarget[1].Data, &dataNodeTarget)
+	targetNode, ok := dataNodeTarget["target"].(map[string]any)
+	if !ok || targetNode["resource_type"] != "node" {
+		t.Errorf("expected target resource_type 'node', got %v", dataNodeTarget["target"])
+	}
+}
+
+func TestNormalizer_EndpointSlice_DeterministicIDs(t *testing.T) {
+	norm := NewNormalizer("cluster-1", "ws-1", "k8s-collector")
+	ready := true
+
+	// Slice 1: IPv4
+	sliceV4 := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "dual-svc-ipv4",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "dual-svc"},
+		},
+		AddressType: "IPv4",
+		Endpoints: []Endpoint{
+			{
+				Addresses:  []string{"10.244.0.10"},
+				Conditions: EndpointConditions{Ready: &ready},
+				TargetRef:  &ObjectReference{Kind: "Pod", Namespace: "default", Name: "dual-pod"},
+			},
+		},
+	}
+
+	// Slice 2: IPv6 (same pod, same service)
+	sliceV6 := &EndpointSlice{
+		ObjectMeta: ObjectMeta{
+			Name:      "dual-svc-ipv6",
+			Namespace: "default",
+			Labels:    map[string]string{"kubernetes.io/service-name": "dual-svc"},
+		},
+		AddressType: "IPv6",
+		Endpoints: []Endpoint{
+			{
+				Addresses:  []string{"fd00::10"},
+				Conditions: EndpointConditions{Ready: &ready},
+				TargetRef:  &ObjectReference{Kind: "Pod", Namespace: "default", Name: "dual-pod"},
+			},
+		},
+	}
+
+	evsV4_run1 := norm.NormalizeEndpointSlice(sliceV4)
+	evsV4_run2 := norm.NormalizeEndpointSlice(sliceV4)
+	evsV6 := norm.NormalizeEndpointSlice(sliceV6)
+
+	// Idempotent: same slice produces identical evidence IDs across runs
+	if evsV4_run1[0].Id != evsV4_run2[0].Id || evsV4_run1[1].Id != evsV4_run2[1].Id {
+		t.Fatalf("expected identical evidence IDs across runs of same slice")
+	}
+
+	// Distinct: IPv4 vs IPv6 slice observations targeting same Pod have different evidence IDs
+	if evsV4_run1[1].Id == evsV6[1].Id {
+		t.Fatalf("COLLISION: IPv4 and IPv6 slice observations produced identical evidence ID: %s", evsV4_run1[1].Id)
+	}
+}

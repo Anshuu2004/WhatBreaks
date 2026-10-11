@@ -29,6 +29,7 @@ type Materializer struct {
 	logger     logging.Logger
 	registryMu sync.Mutex
 	locks      map[string]*workspaceLock
+	onLockWait func(workspaceID string)
 }
 
 // NewMaterializer constructs a Materializer instance.
@@ -42,6 +43,14 @@ func NewMaterializer(store Store, client CoreLoader, logger logging.Logger) *Mat
 		logger: logger,
 		locks:  make(map[string]*workspaceLock),
 	}
+}
+
+// SetOnLockWait registers a test hook invoked when acquireWorkspaceLock is about
+// to wait on a semaphore currently held by another operation.
+func (m *Materializer) SetOnLockWait(fn func(workspaceID string)) {
+	m.registryMu.Lock()
+	defer m.registryMu.Unlock()
+	m.onLockWait = fn
 }
 
 // acquireWorkspaceLock serializes materializations for the same workspaceID while allowing
@@ -65,7 +74,13 @@ func (m *Materializer) acquireWorkspaceLock(ctx context.Context, ws string) (fun
 		m.locks[ws] = lock
 	}
 	lock.refCount++
+	isWaiting := lock.refCount > 1
+	waitHook := m.onLockWait
 	m.registryMu.Unlock()
+
+	if isWaiting && waitHook != nil {
+		waitHook(ws)
+	}
 
 	select {
 	case <-lock.sem:

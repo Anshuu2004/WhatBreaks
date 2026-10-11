@@ -44,6 +44,7 @@ type Client interface {
 	ListSecretsMetadata(ctx context.Context, namespace string) ([]SecretMetadata, error)
 	ListPVCs(ctx context.Context, namespace string) ([]PersistentVolumeClaim, error)
 	ListPVs(ctx context.Context) ([]PersistentVolume, error)
+	ListEndpointSlices(ctx context.Context, namespace string) ([]EndpointSlice, error)
 	Watch(ctx context.Context, resourcePath string, resourceVersion string) (<-chan WatchEvent, <-chan error, error)
 	Ping(ctx context.Context) error
 }
@@ -212,23 +213,56 @@ func (c *RESTClient) execute(req *http.Request) (*http.Response, error) {
 }
 
 func getList[T any](ctx context.Context, c *RESTClient, path string) ([]T, error) {
-	req, err := c.newRequest(ctx, path)
+	parsedURL, err := url.Parse(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid path: %w", err)
 	}
 
-	resp, err := c.execute(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	var allItems []T
+	continueToken := ""
 
-	var list ResourceList[T]
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-		return nil, fmt.Errorf("failed to decode list response from %s: %w", path, err)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		q := parsedURL.Query()
+		if continueToken != "" {
+			q.Set("continue", continueToken)
+		} else {
+			q.Del("continue")
+		}
+
+		pageURL := *parsedURL
+		pageURL.RawQuery = q.Encode()
+		reqPath := pageURL.String()
+
+		req, err := c.newRequest(ctx, reqPath)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := c.execute(req)
+		if err != nil {
+			return nil, err
+		}
+
+		var list ResourceList[T]
+		decodeErr := json.NewDecoder(resp.Body).Decode(&list)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("failed to decode list response from %s: %w", reqPath, decodeErr)
+		}
+
+		allItems = append(allItems, list.Items...)
+
+		continueToken = strings.TrimSpace(list.Metadata.Continue)
+		if continueToken == "" {
+			break
+		}
 	}
 
-	return list.Items, nil
+	return allItems, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +410,14 @@ func (c *RESTClient) ListPVCs(ctx context.Context, namespace string) ([]Persiste
 
 func (c *RESTClient) ListPVs(ctx context.Context) ([]PersistentVolume, error) {
 	return getList[PersistentVolume](ctx, c, "/api/v1/persistentvolumes")
+}
+
+func (c *RESTClient) ListEndpointSlices(ctx context.Context, namespace string) ([]EndpointSlice, error) {
+	path := "/apis/discovery.k8s.io/v1/endpointslices"
+	if namespace != "" {
+		path = fmt.Sprintf("/apis/discovery.k8s.io/v1/namespaces/%s/endpointslices", url.PathEscape(namespace))
+	}
+	return getList[EndpointSlice](ctx, c, path)
 }
 
 // Watch opens a streaming chunked HTTP connection to the Kubernetes API.

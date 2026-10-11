@@ -504,6 +504,43 @@ func (c *Collector) CollectDetailed(ctx context.Context) (*discovery.CollectionR
 					allEvidence = append(allEvidence, c.normalizer.NormalizePVC(&pvcs[i])...)
 				}
 			}
+
+			// EndpointSlices (Optional scope under discovery.k8s.io/v1)
+			endpointSlices, err := c.client.ListEndpointSlices(trackCtx, ns)
+			if err != nil {
+				if isContextErr(err) {
+					if trackCtx.Err() != nil {
+						return trackCtx.Err()
+					}
+					return err
+				}
+				recordFailure(ScopeEndpointSlices, fmt.Sprintf("EndpointSlice (namespace: %q)", ns), err)
+			} else {
+				recordSuccess(ScopeEndpointSlices)
+				servicesByName := make(map[string]*Service, len(services))
+				for i := range services {
+					servicesByName[services[i].ObjectMeta.Name] = &services[i]
+				}
+				for i := range endpointSlices {
+					svcName := ""
+					if endpointSlices[i].ObjectMeta.Labels != nil {
+						svcName = endpointSlices[i].ObjectMeta.Labels["kubernetes.io/service-name"]
+					}
+					if svcName == "" {
+						for _, owner := range endpointSlices[i].ObjectMeta.OwnerReferences {
+							if strings.EqualFold(owner.Kind, "service") && owner.Name != "" {
+								svcName = owner.Name
+								break
+							}
+						}
+					}
+					var associatedSvc *Service
+					if svcName != "" {
+						associatedSvc = servicesByName[svcName]
+					}
+					allEvidence = append(allEvidence, c.normalizer.NormalizeEndpointSlice(&endpointSlices[i], associatedSvc)...)
+				}
+			}
 		}
 
 		var succScopes []string

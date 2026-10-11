@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
@@ -721,6 +722,188 @@ func (n *Normalizer) NormalizePV(pv *PersistentVolume) []*corev1.Evidence {
 			"target":         targetPVC,
 		}
 		evs = append(evs, n.buildEvidence(ObservationResourceReference, subject, refData))
+	}
+
+	return evs
+}
+
+// NormalizeEndpointSlice produces evidence observations for discovery.k8s.io/v1 EndpointSlices.
+// It resolves:
+//   - Owning Service via label "kubernetes.io/service-name" (with fallback to ownerReferences).
+//   - Backend Pods via endpoint targetRef, requiring Kind == "Pod".
+//   - Endpoint addresses, ports, address family, readiness, serving, and terminating conditions.
+//
+// Invariants:
+//   - Emits CONFIGURATION evidence for the EndpointSlice itself.
+//   - Emits RESOURCE_REFERENCE evidence ("endpoint_slice_member") on the Service subject.
+//   - Preserves readiness and termination metadata rather than silently discarding non-ready endpoints.
+//   - Evaluates routing policy: endpoints marked terminating or non-ready (without publishNotReadyAddresses)
+//     have is_routing = false.
+//   - NEVER emits CALLS relationships or evidence.
+//   - Deterministic evidence IDs prevent collisions between distinct slices and endpoints.
+func (n *Normalizer) NormalizeEndpointSlice(slice *EndpointSlice, svc ...*Service) []*corev1.Evidence {
+	if slice == nil {
+		return nil
+	}
+
+	var evs []*corev1.Evidence
+
+	// 1. EndpointSlice configuration evidence
+	sliceSubject := BuildIdentity(n.clusterID, TypeEndpointSlice, slice.ObjectMeta.Namespace, slice.ObjectMeta.Name)
+	configData := map[string]any{
+		"name":         slice.ObjectMeta.Name,
+		"namespace":    slice.ObjectMeta.Namespace,
+		"address_type": slice.AddressType,
+		"labels":       slice.ObjectMeta.Labels,
+		"cluster_id":   n.clusterID,
+	}
+	configBytes, _ := json.Marshal(configData)
+	evs = append(evs, &corev1.Evidence{
+		Id:              DeterministicEvidenceID("endpoint_slice_config", n.clusterID, slice.ObjectMeta.Namespace, slice.ObjectMeta.Name),
+		Source:          n.source(),
+		ObservedAt:      n.observedAt(),
+		ObservationType: ObservationConfiguration,
+		Subject:         sliceSubject,
+		Data:            configBytes,
+	})
+
+	// 2. Resolve owning Service name from kubernetes.io/service-name label
+	serviceName := ""
+	if slice.ObjectMeta.Labels != nil {
+		serviceName = slice.ObjectMeta.Labels["kubernetes.io/service-name"]
+	}
+	if serviceName == "" {
+		for _, owner := range slice.ObjectMeta.OwnerReferences {
+			if strings.EqualFold(owner.Kind, "service") && owner.Name != "" {
+				serviceName = owner.Name
+				break
+			}
+		}
+	}
+
+	if serviceName == "" {
+		// Without an associated Service, cannot establish Service-to-Pod routing references
+		return evs
+	}
+
+	serviceSubject := BuildIdentity(n.clusterID, TypeService, slice.ObjectMeta.Namespace, serviceName)
+
+	// Determine publishNotReadyAddresses from the associated Service specification.
+	// Invariants:
+	// - Service.spec.publishNotReadyAddresses is the authoritative source of truth.
+	// - Annotations must NOT infer or override the Service specification.
+	// - If the associated Service is nil or not resolved, follow conservative default (false).
+	publishNotReady := false
+	if len(svc) > 0 && svc[0] != nil {
+		if svc[0].ObjectMeta.Name == serviceName {
+			publishNotReady = svc[0].Spec.PublishNotReadyAddresses
+		}
+	}
+
+	// 3. Process endpoints
+	for epIdx, ep := range slice.Endpoints {
+		var targetPod *corev1.ResourceIdentity
+		if ep.TargetRef != nil {
+			podNamespace := ep.TargetRef.Namespace
+			if podNamespace == "" {
+				podNamespace = slice.ObjectMeta.Namespace
+			}
+			targetPod = BuildIdentity(n.clusterID, strings.ToLower(ep.TargetRef.Kind), podNamespace, ep.TargetRef.Name)
+		}
+
+		// Readiness, serving, terminating conditions
+		isReady := ep.Conditions.Ready != nil && *ep.Conditions.Ready
+		isServing := ep.Conditions.Serving != nil && *ep.Conditions.Serving
+		isTerminating := ep.Conditions.Terminating != nil && *ep.Conditions.Terminating
+
+		// Routing policy:
+		// Do not claim an endpoint is receiving traffic merely because it appears in an EndpointSlice.
+		// - If terminating: NOT routing (terminating pods are shutting down/draining).
+		// - If publishNotReady: routing if not terminating.
+		// - If ready: routing if not terminating.
+		// - If ready is nil but serving is true: routing if not terminating.
+		// - Otherwise (unready): NOT routing.
+		isRouting := false
+		if !isTerminating {
+			if publishNotReady {
+				isRouting = true
+			} else if ep.Conditions.Ready != nil {
+				isRouting = isReady
+			} else if ep.Conditions.Serving != nil {
+				isRouting = isServing
+			}
+		}
+
+		primaryAddr := ""
+		if len(ep.Addresses) > 0 {
+			primaryAddr = ep.Addresses[0]
+		}
+
+		targetProviderID := ""
+		if targetPod != nil {
+			targetProviderID = targetPod.ProviderId
+		}
+
+		evID := DeterministicEvidenceID(
+			"endpoint_slice_member",
+			n.clusterID,
+			slice.ObjectMeta.Namespace,
+			slice.ObjectMeta.Name,
+			serviceName,
+			targetProviderID,
+			slice.AddressType,
+			primaryAddr,
+			fmt.Sprintf("%d", epIdx),
+		)
+
+		portsData := make([]map[string]any, 0, len(slice.Ports))
+		for _, p := range slice.Ports {
+			portMap := map[string]any{}
+			if p.Name != nil {
+				portMap["name"] = *p.Name
+			}
+			if p.Port != nil {
+				portMap["port"] = *p.Port
+			}
+			if p.Protocol != nil {
+				portMap["protocol"] = *p.Protocol
+			}
+			if p.AppProtocol != nil {
+				portMap["app_protocol"] = *p.AppProtocol
+			}
+			portsData = append(portsData, portMap)
+		}
+
+		refData := map[string]any{
+			"reference_type":              "endpoint_slice_member",
+			"service_name":                serviceName,
+			"endpoint_slice_name":         slice.ObjectMeta.Name,
+			"namespace":                   slice.ObjectMeta.Namespace,
+			"address_type":                slice.AddressType,
+			"addresses":                   ep.Addresses,
+			"ports":                       portsData,
+			"ready":                       isReady,
+			"serving":                     isServing,
+			"terminating":                 isTerminating,
+			"publish_not_ready_addresses": publishNotReady,
+			"is_routing":                  isRouting,
+		}
+
+		if targetPod != nil {
+			refData["target"] = targetPod
+		} else {
+			refData["target"] = nil
+		}
+
+		dataBytes, _ := json.Marshal(refData)
+		evs = append(evs, &corev1.Evidence{
+			Id:              evID,
+			Source:          n.source(),
+			ObservedAt:      n.observedAt(),
+			ObservationType: ObservationResourceReference,
+			Subject:         serviceSubject,
+			Data:            dataBytes,
+		})
 	}
 
 	return evs

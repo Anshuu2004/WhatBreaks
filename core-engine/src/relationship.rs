@@ -122,6 +122,9 @@ impl RelationshipKind {
     /// Access control or permission authorization (e.g. Role authorizes ServiceAccount).
     pub const AUTHORIZES: Self = Self(Cow::Borrowed("AUTHORIZES"));
 
+    /// Network routing to an endpoint (e.g. Service routes to backend Pod).
+    pub const ROUTES_TO: Self = Self(Cow::Borrowed("ROUTES_TO"));
+
     /// Create a `RelationshipKind` from any string-like value.
     pub fn new(s: impl Into<String>) -> Self {
         Self(Cow::Owned(s.into()))
@@ -145,6 +148,7 @@ impl RelationshipKind {
             "OWNS" => Some(RelationshipCategory::Ownership),
             "RUNS_ON" => Some(RelationshipCategory::Placement),
             "AUTHORIZES" => Some(RelationshipCategory::Authorization),
+            "ROUTES_TO" => Some(RelationshipCategory::Network),
             _ => None,
         }
     }
@@ -498,6 +502,7 @@ mod tests {
                 RelationshipKind::AUTHORIZES,
                 RelationshipCategory::Authorization,
             ),
+            (RelationshipKind::ROUTES_TO, RelationshipCategory::Network),
         ];
 
         for (kind, expected_category) in cases {
@@ -514,7 +519,7 @@ mod tests {
             );
         }
 
-        // Verify Network category exists but has no initial kind
+        // Verify Network category string representation
         assert_eq!(RelationshipCategory::Network.as_str(), "Network");
     }
 

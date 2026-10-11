@@ -636,9 +636,10 @@ impl DiscoveryRule for ResourceReferenceRule {
         > = HashMap::new();
 
         for ev in &reference_evidences {
-            // Skip pure network endpoint mappings intended for RuntimeConnectionRule
+            // Skip pure network endpoint mappings intended for RuntimeConnectionRule,
+            // and skip EndpointSlice routing references intended for EndpointSliceRule.
             if let Some(ref_type) = ev.data.get("reference_type").and_then(|v| v.as_str()) {
-                if ref_type == "service_endpoint" || ref_type == "node_address" {
+                if ref_type == "service_endpoint" || ref_type == "node_address" || ref_type == "endpoint_slice_member" {
                     continue;
                 }
             } else if ev.data.get("address").is_some() && ev.data.get("target").is_none() {
@@ -686,6 +687,135 @@ impl DiscoveryRule for ResourceReferenceRule {
             if let Some(ev_ids) = discovered_rels.remove(&key) {
                 let (source, target) = key;
                 let rel = Relationship::new(source, target, RelationshipKind::DEPENDS_ON);
+                let mut ev_vec: Vec<EvidenceId> = ev_ids.into_iter().collect();
+                ev_vec.sort_by_key(|a| a.as_uuid());
+                results.push(DiscoveryResult::Discovered(DiscoveredRelationship::new(
+                    rel, ev_vec,
+                )));
+            }
+        }
+
+        results
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EndpointSliceRule
+// ---------------------------------------------------------------------------
+
+/// Derives `service --ROUTES_TO--> pod` from [`ObservationType::RESOURCE_REFERENCE`]
+/// observations produced by Kubernetes EndpointSlices (`reference_type: "endpoint_slice_member"`).
+///
+/// # Invariants
+///
+/// 1. An observation with `observation_type == RESOURCE_REFERENCE` and
+///    `reference_type == "endpoint_slice_member"` links a Service subject to a backend Pod target.
+/// 2. If `target` is missing or null, the outcome is `Insufficient`.
+/// 3. If `target` is malformed, the outcome is `Invalid`.
+/// 4. Routing condition:
+///    - If `data.is_routing` is explicitly `false` (e.g. endpoint is unready and `publishNotReadyAddresses`
+///      is false, or terminating without serving), no active `ROUTES_TO` relationship is derived.
+///    - Metadata (readiness, addresses, ports) is preserved in the evidence record without claiming
+///      the endpoint is receiving traffic.
+/// 5. Deduplication across EndpointSlices:
+///    - Multiple EndpointSlices for the same Service (e.g. chunked slices or dual-stack IPv4/IPv6)
+///      targeting the same Pod merge into a single `ROUTES_TO` relationship.
+///    - All supporting evidence IDs from all slices are preserved in `supporting_evidence`.
+/// 6. Category mapping:
+///    - The derived relationship has `RelationshipKind::ROUTES_TO` and `RelationshipCategory::Network`.
+///    - Never emits `CALLS`.
+pub struct EndpointSliceRule;
+
+impl DiscoveryRule for EndpointSliceRule {
+    fn name(&self) -> &str {
+        "EndpointSliceRule"
+    }
+
+    fn apply(&self, evidence: &[Evidence]) -> Vec<DiscoveryResult> {
+        let slice_evidences: Vec<&Evidence> = evidence
+            .iter()
+            .filter(|e| {
+                e.observation_type == ObservationType::RESOURCE_REFERENCE
+                    && e.data
+                        .get("reference_type")
+                        .and_then(|v| v.as_str())
+                        == Some("endpoint_slice_member")
+            })
+            .collect();
+
+        if slice_evidences.is_empty() {
+            return vec![];
+        }
+
+        let mut results: Vec<DiscoveryResult> = Vec::new();
+        let mut discovered_rels: HashMap<
+            (ResourceIdentity, ResourceIdentity),
+            HashSet<EvidenceId>,
+        > = HashMap::new();
+
+        for ev in &slice_evidences {
+            // Validate that the source is a Kubernetes Service
+            if ev.subject.provider.as_str() != "kubernetes" || ev.subject.resource_type.as_str() != "service" {
+                continue;
+            }
+
+            let Some(target_val) = ev.data.get("target") else {
+                results.push(DiscoveryResult::Insufficient);
+                continue;
+            };
+
+            if target_val.is_null() {
+                results.push(DiscoveryResult::Insufficient);
+                continue;
+            }
+
+            let target_identity = match parse_resource_identity(target_val) {
+                Ok(id) => id,
+                Err(err) => {
+                    results.push(DiscoveryResult::Invalid {
+                        description: format!(
+                            "EndpointSlice evidence {} has malformed 'target': {}",
+                            ev.id, err
+                        ),
+                    });
+                    continue;
+                }
+            };
+
+            // Validate that the target is a Kubernetes Pod
+            if target_identity.provider.as_str() != "kubernetes" || target_identity.resource_type.as_str() != "pod" {
+                continue;
+            }
+
+            // Check routing policy: endpoints marked not routing (e.g. unready) do not derive ROUTES_TO
+            let is_routing = ev
+                .data
+                .get("is_routing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            if !is_routing {
+                continue;
+            }
+
+            discovered_rels
+                .entry((ev.subject.clone(), target_identity))
+                .or_default()
+                .insert(ev.id);
+        }
+
+        let mut sorted_rel_keys: Vec<(ResourceIdentity, ResourceIdentity)> =
+            discovered_rels.keys().cloned().collect();
+        sorted_rel_keys.sort_by(|(s1, t1), (s2, t2)| {
+            s1.to_string()
+                .cmp(&s2.to_string())
+                .then_with(|| t1.to_string().cmp(&t2.to_string()))
+        });
+
+        for key in sorted_rel_keys {
+            if let Some(ev_ids) = discovered_rels.remove(&key) {
+                let (source, target) = key;
+                let rel = Relationship::new(source, target, RelationshipKind::ROUTES_TO);
                 let mut ev_vec: Vec<EvidenceId> = ev_ids.into_iter().collect();
                 ev_vec.sort_by_key(|a| a.as_uuid());
                 results.push(DiscoveryResult::Discovered(DiscoveredRelationship::new(
@@ -747,12 +877,13 @@ impl DiscoveryEngine {
 
     /// Create a `DiscoveryEngine` pre-loaded with the default v2 rule set.
     ///
-    /// v2 rules: [`RuntimeConnectionRule`], [`OwnershipRule`], [`ResourceReferenceRule`].
+    /// v2 rules: [`RuntimeConnectionRule`], [`OwnershipRule`], [`ResourceReferenceRule`], [`EndpointSliceRule`].
     pub fn default_v2() -> Self {
         Self::new(vec![
             Box::new(RuntimeConnectionRule),
             Box::new(OwnershipRule),
             Box::new(ResourceReferenceRule),
+            Box::new(EndpointSliceRule),
         ])
     }
 
@@ -2076,7 +2207,7 @@ mod tests {
     #[test]
     fn test_discovery_engine_default_v2_runs_all_rules() {
         let engine = DiscoveryEngine::default_v2();
-        assert_eq!(engine.rule_count(), 3);
+        assert_eq!(engine.rule_count(), 4);
 
         let pod = pod_identity("payments-api");
         let db = db_identity("payments-db");
@@ -2089,6 +2220,11 @@ mod tests {
             Provider::new("kubernetes"),
             ResourceKind::new("configmap"),
             "payments/app-config",
+        );
+        let svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "payments/web-svc",
         );
 
         // 1. Runtime connection evidence
@@ -2126,13 +2262,31 @@ mod tests {
             }),
         );
 
-        let results = engine.run(&[conn, map, owner_ev, ref_ev]);
+        // 4. EndpointSlice routing evidence
+        let ep_ev = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "payments/payments-api"
+                },
+                "is_routing": true
+            }),
+        );
+
+        let results = engine.run(&[conn, map, owner_ev, ref_ev, ep_ev]);
 
         // Expected:
         // - RuntimeConnectionRule: pod -> db (CALLS)
         // - OwnershipRule: dep -> pod (OWNS)
         // - ResourceReferenceRule: dep -> cm (DEPENDS_ON)
-        assert_eq!(results.len(), 3);
+        // - EndpointSliceRule: svc -> pod (ROUTES_TO)
+        assert_eq!(results.len(), 4);
 
         let rels: Vec<_> = results.iter().map(|r| r.discovered().unwrap()).collect();
         assert!(rels.iter().any(|d| d.relationship.source == pod
@@ -2144,6 +2298,10 @@ mod tests {
         assert!(rels.iter().any(|d| d.relationship.source == dep
             && d.relationship.target == cm
             && d.relationship.kind == RelationshipKind::DEPENDS_ON));
+        assert!(rels.iter().any(|d| d.relationship.source == svc
+            && d.relationship.target == pod
+            && d.relationship.kind == RelationshipKind::ROUTES_TO
+            && d.relationship.category == crate::relationship::RelationshipCategory::Network));
     }
 
     // -----------------------------------------------------------------------
@@ -2523,5 +2681,393 @@ mod tests {
         assert_eq!(delete_result.len(), 2);
         assert!(delete_result.contains(&caller_pod));
         assert!(delete_result.contains(&config_dep));
+    }
+
+    // -----------------------------------------------------------------------
+    // 41. EndpointSliceRule discovers Service --ROUTES_TO--> Pod
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_endpoint_slice_rule_discovers_routes_to() {
+        let svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "prod/order-service",
+        );
+        let pod = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("pod"),
+            "prod/order-backend-abc",
+        );
+
+        let ev = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "prod/order-backend-abc"
+                },
+                "is_routing": true,
+                "address": "10.244.0.5",
+                "port": 8080,
+                "address_type": "IPv4"
+            }),
+        );
+
+        let rule = EndpointSliceRule;
+        let results = rule.apply(&[ev.clone()]);
+        assert_eq!(results.len(), 1);
+
+        let discovered = results[0].discovered().expect("must be discovered");
+        assert_eq!(discovered.relationship.source, svc);
+        assert_eq!(discovered.relationship.target, pod);
+        assert_eq!(discovered.relationship.kind, RelationshipKind::ROUTES_TO);
+        assert_eq!(
+            discovered.relationship.category,
+            crate::relationship::RelationshipCategory::Network
+        );
+        assert_eq!(discovered.supporting_evidence, vec![ev.id]);
+    }
+
+    // -----------------------------------------------------------------------
+    // 42. EndpointSliceRule: unready endpoints do not create ROUTES_TO
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_endpoint_slice_rule_unready_does_not_create_routes_to() {
+        let svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "prod/order-service",
+        );
+
+        let ev_unready = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "prod/order-backend-unready"
+                },
+                "is_routing": false,
+                "ready": false,
+                "serving": false,
+                "terminating": false
+            }),
+        );
+
+        let ev_terminating = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "prod/order-backend-terminating"
+                },
+                "is_routing": false,
+                "ready": false,
+                "serving": false,
+                "terminating": true
+            }),
+        );
+
+        let rule = EndpointSliceRule;
+        let results = rule.apply(&[ev_unready, ev_terminating]);
+        assert!(results.is_empty(), "unready/terminating endpoints must not create ROUTES_TO");
+    }
+
+    // -----------------------------------------------------------------------
+    // 43. EndpointSliceRule: missing or non-pod targets are skipped
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_endpoint_slice_rule_missing_or_non_pod_target_skipped() {
+        let svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "prod/order-service",
+        );
+
+        // Non-pod target (e.g. Node or external IP without targetRef)
+        let ev_node = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "node",
+                    "provider_id": "worker-1"
+                },
+                "is_routing": true
+            }),
+        );
+
+        // Null target (headless or external endpoint without targetRef)
+        let ev_null = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": null,
+                "is_routing": true
+            }),
+        );
+
+        let rule = EndpointSliceRule;
+        let results = rule.apply(&[ev_node, ev_null]);
+        // Neither should produce a relationship (null target returns Insufficient)
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], DiscoveryResult::Insufficient));
+    }
+
+    // -----------------------------------------------------------------------
+    // 43b. EndpointSliceRule: validates both source (K8s Service) and target (K8s Pod)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_endpoint_slice_rule_endpoint_validation_negatives_and_positive() {
+        let rule = EndpointSliceRule;
+        let valid_svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "prod/order-service",
+        );
+        let valid_pod_json = json!({
+            "provider": "kubernetes",
+            "resource_type": "pod",
+            "provider_id": "prod/order-backend-1"
+        });
+
+        // 1. Negative: Non-Service source (e.g. Deployment)
+        let non_svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("deployment"),
+            "prod/order-deploy",
+        );
+        let ev_non_svc = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            non_svc,
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": valid_pod_json,
+                "is_routing": true
+            }),
+        );
+        let res_non_svc = rule.apply(&[ev_non_svc]);
+        assert!(res_non_svc.is_empty(), "non-Service source must not produce ROUTES_TO");
+
+        // 2. Negative: Source from wrong provider (e.g. AWS)
+        let aws_svc = ResourceIdentity::new(
+            Provider::new("aws"),
+            ResourceKind::new("service"),
+            "prod/order-service",
+        );
+        let ev_wrong_prov_src = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            aws_svc,
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": valid_pod_json,
+                "is_routing": true
+            }),
+        );
+        let res_wrong_prov_src = rule.apply(&[ev_wrong_prov_src]);
+        assert!(res_wrong_prov_src.is_empty(), "source from wrong provider must not produce ROUTES_TO");
+
+        // 3. Negative: Non-Pod target (e.g. Node)
+        let ev_non_pod = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            valid_svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "node",
+                    "provider_id": "worker-1"
+                },
+                "is_routing": true
+            }),
+        );
+        let res_non_pod = rule.apply(&[ev_non_pod]);
+        assert!(res_non_pod.is_empty(), "non-Pod target must not produce ROUTES_TO");
+
+        // 4. Negative: Target from wrong provider (e.g. AWS)
+        let ev_wrong_prov_tgt = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            valid_svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "aws",
+                    "resource_type": "pod",
+                    "provider_id": "prod/order-backend-1"
+                },
+                "is_routing": true
+            }),
+        );
+        let res_wrong_prov_tgt = rule.apply(&[ev_wrong_prov_tgt]);
+        assert!(res_wrong_prov_tgt.is_empty(), "target from wrong provider must not produce ROUTES_TO");
+
+        // 5. Positive: Valid Kubernetes Service -> Kubernetes Pod produces ROUTES_TO
+        let ev_valid = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            valid_svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": valid_pod_json,
+                "is_routing": true
+            }),
+        );
+        let res_valid = rule.apply(&[ev_valid]);
+        assert_eq!(res_valid.len(), 1, "valid Service -> Pod evidence must produce exactly 1 result");
+        match &res_valid[0] {
+            DiscoveryResult::Discovered(discovered) => {
+                assert_eq!(discovered.relationship.kind, RelationshipKind::ROUTES_TO);
+                assert_eq!(discovered.relationship.category, crate::relationship::RelationshipCategory::Network);
+                assert_eq!(discovered.relationship.source, valid_svc);
+                assert_eq!(discovered.relationship.target.resource_type.as_str(), "pod");
+            }
+            other => panic!("expected Discovered result, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 44. EndpointSliceRule: multiple slices and dual-stack deduplication
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_endpoint_slice_rule_deduplicates_multiple_slices_and_dual_stack() {
+        let svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "prod/dual-stack-svc",
+        );
+        let pod = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("pod"),
+            "prod/dual-stack-pod",
+        );
+
+        // IPv4 slice observation
+        let ev_v4 = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "prod/dual-stack-pod"
+                },
+                "is_routing": true,
+                "address": "10.244.0.10",
+                "address_type": "IPv4"
+            }),
+        );
+
+        // IPv6 slice observation
+        let ev_v6 = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "prod/dual-stack-pod"
+                },
+                "is_routing": true,
+                "address": "fd00::10",
+                "address_type": "IPv6"
+            }),
+        );
+
+        let rule = EndpointSliceRule;
+        let results = rule.apply(&[ev_v4.clone(), ev_v6.clone()]);
+
+        // Must deduplicate to exactly 1 relationship
+        assert_eq!(results.len(), 1);
+        let discovered = results[0].discovered().expect("must be discovered");
+        assert_eq!(discovered.relationship.source, svc);
+        assert_eq!(discovered.relationship.target, pod);
+        assert_eq!(discovered.relationship.kind, RelationshipKind::ROUTES_TO);
+        assert_eq!(
+            discovered.relationship.category,
+            crate::relationship::RelationshipCategory::Network
+        );
+
+        // Both evidence IDs are preserved
+        assert_eq!(discovered.supporting_evidence.len(), 2);
+        assert!(discovered.supporting_evidence.contains(&ev_v4.id));
+        assert!(discovered.supporting_evidence.contains(&ev_v6.id));
+    }
+
+    // -----------------------------------------------------------------------
+    // 45. EndpointSliceRule never emits CALLS
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_endpoint_slice_never_emits_calls() {
+        let svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "prod/web-svc",
+        );
+
+        let ev = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            svc.clone(),
+            json!({
+                "reference_type": "endpoint_slice_member",
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "pod",
+                    "provider_id": "prod/web-pod"
+                },
+                "is_routing": true
+            }),
+        );
+
+        let rule = EndpointSliceRule;
+        let results = rule.apply(&[ev]);
+
+        for res in results {
+            if let Some(dr) = res.discovered() {
+                assert_ne!(
+                    dr.relationship.kind,
+                    RelationshipKind::CALLS,
+                    "EndpointSlice must never emit CALLS"
+                );
+                assert_eq!(dr.relationship.kind, RelationshipKind::ROUTES_TO);
+            }
+        }
     }
 }

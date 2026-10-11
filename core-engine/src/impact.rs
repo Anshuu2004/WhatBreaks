@@ -92,6 +92,7 @@ use crate::traversal::{Traversal, TraversalDirection};
 /// - [`RelationshipKind::OWNS`]
 /// - [`RelationshipKind::RUNS_ON`]
 /// - [`RelationshipKind::AUTHORIZES`]
+/// - [`RelationshipKind::ROUTES_TO`]
 /// - (any unknown or custom kinds)
 #[inline]
 pub fn propagates_impact(kind: &RelationshipKind) -> bool {
@@ -1670,5 +1671,80 @@ mod tests {
                 assessment.limitations
             );
         }
+    }
+
+    #[test]
+    fn test_routes_to_does_not_propagate_under_any_change_type() {
+        let mut g = Graph::new();
+        let svc = make_identity("payment-service");
+        let pod = make_identity("payment-pod");
+
+        // Service --ROUTES_TO--> Pod
+        g.add_relationship(Relationship::new(
+            svc.clone(),
+            pod.clone(),
+            RelationshipKind::ROUTES_TO,
+        ));
+
+        // When analyzing incoming impact on svc: pod must NOT be impacted.
+        // When analyzing outgoing impact on svc: pod must NOT be impacted.
+        for ct in [ChangeType::Delete, ChangeType::Update, ChangeType::Scale, ChangeType::Replace] {
+            let change = ProposedChange::new(ct);
+            let in_req = ImpactRequest::incoming(svc.clone(), 5).with_proposed_change(change.clone());
+            let in_res = ImpactEngine::analyze(&g, &in_req);
+            assert_eq!(
+                in_res.len(),
+                0,
+                "ROUTES_TO should not propagate incoming impact for {:?}",
+                ct
+            );
+
+            let out_req = ImpactRequest::outgoing(svc.clone(), 5).with_proposed_change(change);
+            let out_res = ImpactEngine::analyze(&g, &out_req);
+            assert_eq!(
+                out_res.len(),
+                0,
+                "ROUTES_TO should not propagate outgoing impact for {:?}",
+                ct
+            );
+        }
+    }
+
+    #[test]
+    fn test_service_scale_reaches_runtime_callers_not_backend_pods() {
+        let mut g = Graph::new();
+        let client_pod = make_identity("client-pod");
+        let svc = make_identity("payment-service");
+        let backend_pod = make_identity("backend-pod");
+
+        // client_pod --CALLS--> svc (runtime invocation)
+        g.add_relationship(Relationship::new(
+            client_pod.clone(),
+            svc.clone(),
+            RelationshipKind::CALLS,
+        ));
+
+        // svc --ROUTES_TO--> backend_pod (network routing membership)
+        g.add_relationship(Relationship::new(
+            svc.clone(),
+            backend_pod.clone(),
+            RelationshipKind::ROUTES_TO,
+        ));
+
+        // SCALE proposed on svc:
+        // Incoming impact must identify client_pod (caller), but NOT backend_pod.
+        let scale_req = ImpactRequest::incoming(svc.clone(), 5)
+            .with_proposed_change(ProposedChange::new(ChangeType::Scale));
+        let scale_res = ImpactEngine::analyze(&g, &scale_req);
+
+        assert_eq!(scale_res.len(), 1);
+        assert_eq!(scale_res.impacted[0].resource, client_pod);
+        assert!(!scale_res.contains(&backend_pod));
+
+        // In addition, outgoing impact on svc must not reach backend_pod
+        let out_scale_req = ImpactRequest::outgoing(svc.clone(), 5)
+            .with_proposed_change(ProposedChange::new(ChangeType::Scale));
+        let out_scale_res = ImpactEngine::analyze(&g, &out_scale_req);
+        assert_eq!(out_scale_res.len(), 0);
     }
 }

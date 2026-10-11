@@ -31,6 +31,7 @@ const (
 	TypePersistentVolume      = "persistentvolume"
 	TypePersistentVolumeClaim = "persistentvolumeclaim"
 	TypeServiceAccount        = "serviceaccount"
+	TypeEndpointSlice         = "endpointslice"
 )
 
 // IsClusterScoped reports whether a Kubernetes resource type is scoped to the cluster rather than a namespace.

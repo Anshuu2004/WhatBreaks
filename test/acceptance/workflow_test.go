@@ -118,6 +118,9 @@ func (m *mockWorkflowK8sClient) ListPVs(ctx context.Context) ([]k8s.PersistentVo
 func (m *mockWorkflowK8sClient) ListPVCs(ctx context.Context, ns string) ([]k8s.PersistentVolumeClaim, error) {
 	return nil, nil
 }
+func (m *mockWorkflowK8sClient) ListEndpointSlices(ctx context.Context, ns string) ([]k8s.EndpointSlice, error) {
+	return nil, nil
+}
 func (m *mockWorkflowK8sClient) Watch(ctx context.Context, resourcePath string, resourceVersion string) (<-chan k8s.WatchEvent, <-chan error, error) {
 	return nil, nil, nil
 }

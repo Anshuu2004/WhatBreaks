@@ -13,6 +13,7 @@ const (
 	ScopePersistentVolumes      = "persistentvolumes"
 	ScopePersistentVolumeClaims = "persistentvolumeclaims"
 	ScopeServiceAccounts        = "serviceaccounts"
+	ScopeEndpointSlices         = "endpointslices"
 )
 
 // ScopeRequirement defines whether a resource scope is mandatory for discovery completeness.
@@ -33,7 +34,7 @@ type ScopePolicy struct {
 
 // DefaultScopePolicy returns the authoritative WhatBreaks discovery policy:
 // Required: pods, services, deployments, replicasets, configmaps, secrets
-// Optional: ingresses, nodes, persistentvolumes, persistentvolumeclaims, serviceaccounts, namespaces
+// Optional: ingresses, nodes, persistentvolumes, persistentvolumeclaims, serviceaccounts, namespaces, endpointslices
 func DefaultScopePolicy() *ScopePolicy {
 	return &ScopePolicy{
 		requirements: map[string]ScopeRequirement{
@@ -49,6 +50,7 @@ func DefaultScopePolicy() *ScopePolicy {
 			ScopePersistentVolumeClaims: ScopeOptional,
 			ScopeServiceAccounts:        ScopeOptional,
 			ScopeNamespaces:             ScopeOptional,
+			ScopeEndpointSlices:         ScopeOptional,
 		},
 	}
 }

@@ -89,6 +89,12 @@ func TestClient_ListOperations(t *testing.T) {
 					{ObjectMeta: ObjectMeta{Name: "pv-01"}},
 				},
 			})
+		case "/apis/discovery.k8s.io/v1/namespaces/default/endpointslices":
+			_ = json.NewEncoder(w).Encode(ResourceList[EndpointSlice]{
+				Items: []EndpointSlice{
+					{ObjectMeta: ObjectMeta{Name: "web-slice-1", Namespace: "default"}},
+				},
+			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -161,6 +167,12 @@ func TestClient_ListOperations(t *testing.T) {
 	pvList, err := client.ListPVs(ctx)
 	if err != nil || len(pvList) != 1 {
 		t.Errorf("ListPVs failed: %v, count: %d", err, len(pvList))
+	}
+
+	// 10. EndpointSlices
+	sliceList, err := client.ListEndpointSlices(ctx, "default")
+	if err != nil || len(sliceList) != 1 {
+		t.Errorf("ListEndpointSlices failed: %v, count: %d", err, len(sliceList))
 	}
 
 	// Verify all HTTP calls used GET
@@ -268,5 +280,316 @@ func TestClient_WatchStreaming(t *testing.T) {
 	}
 	if received[0] != WatchAdded || received[1] != WatchModified || received[2] != WatchDeleted {
 		t.Errorf("unexpected event sequence: %v", received)
+	}
+}
+
+func TestClient_ListEndpointSlices_Success(t *testing.T) {
+	ready := true
+	portName := "http"
+	portNum := int32(8080)
+	proto := "TCP"
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis/discovery.k8s.io/v1/namespaces/prod/endpointslices" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ResourceList[EndpointSlice]{
+			Items: []EndpointSlice{
+				{
+					ObjectMeta: ObjectMeta{
+						Name:      "cart-svc-slice-1",
+						Namespace: "prod",
+						Labels: map[string]string{
+							"kubernetes.io/service-name": "cart-svc",
+						},
+					},
+					AddressType: "IPv4",
+					Endpoints: []Endpoint{
+						{
+							Addresses: []string{"10.244.1.20"},
+							Conditions: EndpointConditions{
+								Ready: &ready,
+							},
+							TargetRef: &ObjectReference{
+								Kind:      "Pod",
+								Namespace: "prod",
+								Name:      "cart-pod-abc",
+							},
+						},
+					},
+					Ports: []EndpointPort{
+						{
+							Name:     &portName,
+							Port:     &portNum,
+							Protocol: &proto,
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	slices, err := client.ListEndpointSlices(context.Background(), "prod")
+	if err != nil {
+		t.Fatalf("ListEndpointSlices failed: %v", err)
+	}
+	if len(slices) != 1 {
+		t.Fatalf("expected 1 slice, got %d", len(slices))
+	}
+
+	s := slices[0]
+	if s.ObjectMeta.Name != "cart-svc-slice-1" {
+		t.Errorf("unexpected name: %s", s.ObjectMeta.Name)
+	}
+	if s.ObjectMeta.Labels["kubernetes.io/service-name"] != "cart-svc" {
+		t.Errorf("unexpected service-name label: %v", s.ObjectMeta.Labels)
+	}
+	if s.AddressType != "IPv4" {
+		t.Errorf("expected IPv4, got %s", s.AddressType)
+	}
+	if len(s.Endpoints) != 1 || len(s.Endpoints[0].Addresses) != 1 || s.Endpoints[0].Addresses[0] != "10.244.1.20" {
+		t.Errorf("unexpected endpoint addresses: %v", s.Endpoints)
+	}
+	if s.Endpoints[0].Conditions.Ready == nil || !*s.Endpoints[0].Conditions.Ready {
+		t.Errorf("expected Ready condition true")
+	}
+	if s.Endpoints[0].TargetRef == nil || s.Endpoints[0].TargetRef.Name != "cart-pod-abc" {
+		t.Errorf("unexpected targetRef: %v", s.Endpoints[0].TargetRef)
+	}
+	if len(s.Ports) != 1 || *s.Ports[0].Port != 8080 {
+		t.Errorf("unexpected ports: %v", s.Ports)
+	}
+}
+
+func TestClient_ListEndpointSlices_Forbidden(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(Status{
+			Status:  "Failure",
+			Message: "endpointslices.discovery.k8s.io is forbidden: User cannot list resource in API group discovery.k8s.io",
+			Reason:  "Forbidden",
+			Code:    403,
+		})
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.ListEndpointSlices(context.Background(), "default")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expected ErrForbidden, got: %v", err)
+	}
+}
+
+func TestRESTClient_ListPagination_MultiPageAndQueryPreservation(t *testing.T) {
+	var requestedURLs []string
+	var mu sync.Mutex
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestedURLs = append(requestedURLs, r.URL.String())
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		continueToken := r.URL.Query().Get("continue")
+
+		switch continueToken {
+		case "":
+			// First page: return 2 items and a continuation token
+			_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+				Metadata: ListMeta{
+					Continue: "token-page-2",
+				},
+				Items: []Pod{
+					{ObjectMeta: ObjectMeta{Name: "pod-1", Namespace: "default"}},
+					{ObjectMeta: ObjectMeta{Name: "pod-2", Namespace: "default"}},
+				},
+			})
+		case "token-page-2":
+			// Second/final page: return 2 items and empty continuation token
+			_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+				Metadata: ListMeta{
+					Continue: "",
+				},
+				Items: []Pod{
+					{ObjectMeta: ObjectMeta{Name: "pod-3", Namespace: "default"}},
+					{ObjectMeta: ObjectMeta{Name: "pod-4", Namespace: "default"}},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	pods, err := client.ListPods(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("ListPods failed: %v", err)
+	}
+
+	if len(pods) != 4 {
+		t.Fatalf("expected 4 pods from 2 pages, got %d", len(pods))
+	}
+	expectedNames := []string{"pod-1", "pod-2", "pod-3", "pod-4"}
+	for i, expected := range expectedNames {
+		if pods[i].ObjectMeta.Name != expected {
+			t.Errorf("pod[%d] expected name %s, got %s", i, expected, pods[i].ObjectMeta.Name)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requestedURLs) != 2 {
+		t.Fatalf("expected 2 page requests, got %d: %v", len(requestedURLs), requestedURLs)
+	}
+	if requestedURLs[0] != "/api/v1/namespaces/default/pods" {
+		t.Errorf("expected initial URL without continue token, got %s", requestedURLs[0])
+	}
+	if requestedURLs[1] != "/api/v1/namespaces/default/pods?continue=token-page-2" {
+		t.Errorf("expected second URL with continue token, got %s", requestedURLs[1])
+	}
+}
+
+func TestRESTClient_ListPagination_LaterPageFailureReturnsError(t *testing.T) {
+	var requestCount int
+	var mu sync.Mutex
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		count := requestCount
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if count == 1 {
+			// Page 1 succeeds
+			_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+				Metadata: ListMeta{
+					Continue: "token-page-2",
+				},
+				Items: []Pod{
+					{ObjectMeta: ObjectMeta{Name: "pod-1", Namespace: "default"}},
+				},
+			})
+			return
+		}
+
+		// Page 2 fails with 500
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(Status{
+			Status:  "Failure",
+			Message: "Internal server error on page 2",
+			Code:    500,
+		})
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	pods, err := client.ListPods(context.Background(), "default")
+	if err == nil {
+		t.Fatalf("expected error on later page failure, got nil (pods: %d)", len(pods))
+	}
+	if len(pods) != 0 {
+		t.Fatalf("expected no partial results on later page failure, got %d pods", len(pods))
+	}
+}
+
+func TestRESTClient_ListPagination_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Cancel context right as page 1 responds
+		cancel()
+		_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+			Metadata: ListMeta{
+				Continue: "token-page-2",
+			},
+			Items: []Pod{
+				{ObjectMeta: ObjectMeta{Name: "pod-1", Namespace: "default"}},
+			},
+		})
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	_, err = client.ListPods(ctx, "default")
+	if err == nil {
+		t.Fatalf("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+}
+
+func TestRESTClient_ListPagination_SinglePageAndEmpty(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/namespaces/empty/pods" {
+			_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+				Metadata: ListMeta{Continue: ""},
+				Items:    []Pod{},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+			Metadata: ListMeta{Continue: ""},
+			Items: []Pod{
+				{ObjectMeta: ObjectMeta{Name: "single-pod", Namespace: "default"}},
+			},
+		})
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	// Single page with item
+	pods, err := client.ListPods(context.Background(), "default")
+	if err != nil {
+		t.Fatalf("ListPods failed: %v", err)
+	}
+	if len(pods) != 1 || pods[0].ObjectMeta.Name != "single-pod" {
+		t.Fatalf("unexpected pods: %+v", pods)
+	}
+
+	// Empty list
+	emptyPods, err := client.ListPods(context.Background(), "empty")
+	if err != nil {
+		t.Fatalf("ListPods empty failed: %v", err)
+	}
+	if len(emptyPods) != 0 {
+		t.Fatalf("expected 0 pods, got %d", len(emptyPods))
 	}
 }

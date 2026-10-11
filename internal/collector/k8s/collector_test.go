@@ -70,6 +70,27 @@ func createMockKubeServer(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(ResourceList[PersistentVolumeClaim]{
 				Items: []PersistentVolumeClaim{{ObjectMeta: ObjectMeta{Name: "app-pvc", Namespace: "app-prod"}}},
 			})
+		case strings.Contains(p, "/endpointslices"):
+			ready := true
+			_ = json.NewEncoder(w).Encode(ResourceList[EndpointSlice]{
+				Items: []EndpointSlice{{
+					ObjectMeta: ObjectMeta{
+						Name:      "web-slice-1",
+						Namespace: "app-prod",
+						Labels:    map[string]string{"kubernetes.io/service-name": "web-svc"},
+					},
+					AddressType: "IPv4",
+					Endpoints: []Endpoint{{
+						Addresses:  []string{"10.244.0.5"},
+						Conditions: EndpointConditions{Ready: &ready},
+						TargetRef: &ObjectReference{
+							Kind:      "Pod",
+							Namespace: "app-prod",
+							Name:      "web-pod-xyz",
+						},
+					}},
+				}},
+			})
 		case p == "/readyz":
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -586,6 +607,109 @@ func TestCollector_SecretMetadata_MetadataOnlySafety(t *testing.T) {
 	}
 	if !strings.Contains(dataStr, "username") || !strings.Contains(dataStr, "password") {
 		t.Errorf("expected key names to be recorded, got: %s", dataStr)
+	}
+}
+
+// Optional scope failure (e.g. EndpointSlice 403 Forbidden) must not abort collection
+// or cause ErrRequiredScopeFailed, and must NOT be interpreted as an authoritative empty snapshot.
+func TestCollector_EndpointSlice_OptionalScopeFailure(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		p := r.URL.Path
+
+		switch {
+		case strings.Contains(p, "/endpointslices"):
+			// Simulate missing RBAC permissions for discovery.k8s.io
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(Status{
+				Status:  "Failure",
+				Message: "endpointslices.discovery.k8s.io is forbidden",
+				Reason:  "Forbidden",
+				Code:    403,
+			})
+		case strings.Contains(p, "/pods"):
+			_ = json.NewEncoder(w).Encode(ResourceList[Pod]{
+				Items: []Pod{{ObjectMeta: ObjectMeta{Name: "app-pod", Namespace: "default"}}},
+			})
+		case strings.Contains(p, "/services"):
+			_ = json.NewEncoder(w).Encode(ResourceList[Service]{
+				Items: []Service{{ObjectMeta: ObjectMeta{Name: "app-svc", Namespace: "default"}}},
+			})
+		case strings.Contains(p, "/deployments"):
+			_ = json.NewEncoder(w).Encode(ResourceList[Deployment]{
+				Items: []Deployment{{ObjectMeta: ObjectMeta{Name: "app-deploy", Namespace: "default"}}},
+			})
+		case strings.Contains(p, "/replicasets"):
+			_ = json.NewEncoder(w).Encode(ResourceList[ReplicaSet]{
+				Items: []ReplicaSet{{ObjectMeta: ObjectMeta{Name: "app-rs", Namespace: "default"}}},
+			})
+		case strings.Contains(p, "/configmaps"):
+			_ = json.NewEncoder(w).Encode(ResourceList[ConfigMap]{
+				Items: []ConfigMap{{ObjectMeta: ObjectMeta{Name: "app-cm", Namespace: "default"}}},
+			})
+		case strings.Contains(p, "/secrets"):
+			_ = json.NewEncoder(w).Encode(ResourceList[SecretMetadata]{
+				Items: []SecretMetadata{{ObjectMeta: ObjectMeta{Name: "app-sec", Namespace: "default"}}},
+			})
+		case p == "/readyz":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	collector, err := New(
+		WithClusterID("opt-fail-cluster"),
+		WithWorkspaceID("ws-opt"),
+		WithClusterWide(false),
+		WithNamespaces("default"),
+		WithClient(client),
+	)
+	if err != nil {
+		t.Fatalf("failed to create collector: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// 1. CollectDetailed must record ScopeEndpointSlices in OptionalFailures, NOT RequiredFailures
+	colResult, err := collector.CollectDetailed(ctx)
+	if err != nil {
+		t.Fatalf("CollectDetailed failed: %v", err)
+	}
+
+	if colResult.HasRequiredFailures() {
+		t.Errorf("SAFETY VIOLATION: optional ScopeEndpointSlices marked as required failure: %v", colResult.RequiredFailures)
+	}
+
+	foundOpt := false
+	for _, f := range colResult.OptionalFailures {
+		if f == ScopeEndpointSlices {
+			foundOpt = true
+			break
+		}
+	}
+	if !foundOpt {
+		t.Errorf("expected ScopeEndpointSlices in OptionalFailures, got: %v", colResult.OptionalFailures)
+	}
+
+	// Completeness must NOT be asserted because collection was partial
+	if colResult.Complete {
+		t.Errorf("SAFETY VIOLATION: partial collection must not assert completeness")
+	}
+
+	// 2. High-level Collect() must succeed and return gathered evidence without ErrRequiredScopeFailed
+	evs, err := collector.Collect(ctx)
+	if err != nil {
+		t.Fatalf("Collect() must not fail on optional scope error, got: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Fatalf("expected evidence from required scopes (pods, services, etc.), got 0")
 	}
 }
 

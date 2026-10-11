@@ -573,3 +573,213 @@ func TestNegative_NoRuntimeRelationshipWithoutRuntimeEvidence(t *testing.T) {
 		}
 	}
 }
+
+func newEndpointSliceEvidence(id, serviceName, podName string, isRouting bool, addr string, addrType string, t0 time.Time) *corev1.Evidence {
+	dataMap := map[string]any{
+		"reference_type": "endpoint_slice_member",
+		"service_name":   serviceName,
+		"address_type":   addrType,
+		"addresses":      []string{addr},
+		"is_routing":     isRouting,
+		"target": &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderId:   "prod/" + podName,
+		},
+	}
+	dataBytes, _ := json.Marshal(dataMap)
+	return &corev1.Evidence{
+		Id: k8s.DeterministicEvidenceID(id),
+		Source: &corev1.EvidenceSource{
+			Provider:  "kubernetes",
+			Collector: "k8s-collector",
+		},
+		ObservedAt:      t0.Format(time.RFC3339Nano),
+		ObservationType: k8s.ObservationResourceReference,
+		Subject: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderId:   "prod/" + serviceName,
+		},
+		Data: dataBytes,
+	}
+}
+
+func TestKubernetesRelationships_ServiceToPodEndpointSlice(t *testing.T) {
+	client := startProdServer(t)
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	reconciler := state.NewReconciler(store, client, nil, nil)
+
+	ws := "ws-ep-routes-to"
+	t0 := time.Now().UTC()
+
+	ev := newEndpointSliceEvidence("ev-slice-1", "order-service", "order-backend-pod-1", true, "10.244.0.5", "IPv4", t0)
+
+	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{ev},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	if res.DiscoveredCount != 1 {
+		t.Fatalf("expected 1 discovered relationship, got %d", res.DiscoveredCount)
+	}
+
+	rels, err := store.ListRelationships(ctx, ws)
+	if err != nil || len(rels) != 1 {
+		t.Fatalf("expected 1 relationship in store, got %d (err: %v)", len(rels), err)
+	}
+
+	r := rels[0]
+	if r.Kind != "ROUTES_TO" {
+		t.Errorf("expected Kind 'ROUTES_TO', got %s", r.Kind)
+	}
+	if r.Category != "Network" {
+		t.Errorf("expected Category 'Network', got %s", r.Category)
+	}
+	if r.Source.ResourceType != "service" || r.Source.ProviderID != "prod/order-service" {
+		t.Errorf("unexpected source: %v", r.Source)
+	}
+	if r.Target.ResourceType != "pod" || r.Target.ProviderID != "prod/order-backend-pod-1" {
+		t.Errorf("unexpected target: %v", r.Target)
+	}
+
+	// Verify provenance contains deterministic evidence ID
+	prov, err := store.GetProvenanceForRelationship(ctx, ws, r.Key())
+	if err != nil || len(prov) != 1 || prov[0] != k8s.DeterministicEvidenceID("ev-slice-1") {
+		t.Errorf("expected provenance [ev-slice-1], got %v (err: %v)", prov, err)
+	}
+}
+
+func TestKubernetesRelationships_EndpointSlice_MultipleSlicesAndDualStack(t *testing.T) {
+	client := startProdServer(t)
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	reconciler := state.NewReconciler(store, client, nil, nil)
+
+	ws := "ws-ep-dual-stack"
+	t0 := time.Now().UTC()
+
+	// Dual-stack IPv4 and IPv6 slice observations for the same service and pod
+	evV4 := newEndpointSliceEvidence("ev-slice-v4", "dual-service", "dual-backend-pod", true, "10.244.0.10", "IPv4", t0)
+	evV6 := newEndpointSliceEvidence("ev-slice-v6", "dual-service", "dual-backend-pod", true, "fd00::10", "IPv6", t0)
+
+	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{evV4, evV6},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	if res.DiscoveredCount != 1 {
+		t.Fatalf("expected deduplication to 1 discovered relationship, got %d", res.DiscoveredCount)
+	}
+
+	rels, _ := store.ListRelationships(ctx, ws)
+	if len(rels) != 1 {
+		t.Fatalf("expected 1 relationship in store, got %d", len(rels))
+	}
+	if rels[0].Kind != "ROUTES_TO" || rels[0].Category != "Network" {
+		t.Errorf("expected ROUTES_TO (Network), got %s (%s)", rels[0].Kind, rels[0].Category)
+	}
+
+	// Invariant: Both evidence IDs are preserved in provenance
+	prov, err := store.GetProvenanceForRelationship(ctx, ws, rels[0].Key())
+	if err != nil || len(prov) != 2 {
+		t.Fatalf("expected 2 provenance IDs for dual-stack relationship, got %d: %v", len(prov), prov)
+	}
+	expectedV4 := k8s.DeterministicEvidenceID("ev-slice-v4")
+	expectedV6 := k8s.DeterministicEvidenceID("ev-slice-v6")
+	hasV4 := prov[0] == expectedV4 || prov[1] == expectedV4
+	hasV6 := prov[0] == expectedV6 || prov[1] == expectedV6
+	if !hasV4 || !hasV6 {
+		t.Errorf("provenance missing expected evidence IDs: %v", prov)
+	}
+}
+
+func TestNegative_EndpointSliceNeverCreatesCalls(t *testing.T) {
+	client := startProdServer(t)
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	reconciler := state.NewReconciler(store, client, nil, nil)
+
+	ws := "ws-ep-no-calls"
+	t0 := time.Now().UTC()
+
+	ev := newEndpointSliceEvidence("ev-slice-pure", "billing-svc", "billing-pod-1", true, "10.244.0.8", "IPv4", t0)
+
+	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{ev},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile failed: %v", err)
+	}
+
+	if res.DiscoveredCount != 1 {
+		t.Fatalf("expected 1 discovered relationship, got %d", res.DiscoveredCount)
+	}
+
+	rels, _ := store.ListRelationships(ctx, ws)
+	for _, r := range rels {
+		if strings.EqualFold(r.Kind, "CALLS") {
+			t.Fatalf("CRITICAL INVARIANT VIOLATION: EndpointSlice created CALLS relationship!")
+		}
+	}
+}
+
+func TestReconciliation_EndpointSlice_PartialCollectionPreservesExisting(t *testing.T) {
+	client := startProdServer(t)
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	reconciler := state.NewReconciler(store, client, nil, nil)
+
+	ws := "ws-ep-partial-preserve"
+	t0 := time.Now().UTC()
+	t1 := t0.Add(1 * time.Minute)
+
+	// Sweep 1: Service, Pod, and EndpointSlice are collected
+	evSlice := newEndpointSliceEvidence("ev-slice-initial", "checkout-svc", "checkout-pod", true, "10.244.0.30", "IPv4", t0)
+	_, err := reconciler.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{evSlice},
+	})
+	if err != nil {
+		t.Fatalf("Sweep 1 reconcile failed: %v", err)
+	}
+
+	relsSweep1, _ := store.ListRelationships(ctx, ws)
+	if len(relsSweep1) != 1 || relsSweep1[0].Kind != "ROUTES_TO" {
+		t.Fatalf("expected 1 ROUTES_TO relationship after Sweep 1, got %v", relsSweep1)
+	}
+
+	// Sweep 2: Partial collection where EndpointSlices optional scope failed or was omitted
+	// Only unrelated config evidence is collected
+	evCM := newReferenceEvidence("ev-cm-other", "kubernetes", "pod", "prod/checkout-pod", "config_map_ref",
+		&corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "configmap", ProviderId: "prod/app-config"}, nil, t1)
+
+	_, err = reconciler.Reconcile(ctx, state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{evCM},
+	})
+	if err != nil {
+		t.Fatalf("Sweep 2 reconcile failed: %v", err)
+	}
+
+	// Invariant: Incomplete/partial collection NEVER deletes previously discovered relationships
+	relsSweep2, _ := store.ListRelationships(ctx, ws)
+	foundRoutesTo := false
+	for _, r := range relsSweep2 {
+		if r.Kind == "ROUTES_TO" && r.Source.ProviderID == "prod/checkout-svc" && r.Target.ProviderID == "prod/checkout-pod" {
+			foundRoutesTo = true
+			break
+		}
+	}
+	if !foundRoutesTo {
+		t.Fatalf("CRITICAL SAFETY VIOLATION: Previously discovered ROUTES_TO relationship deleted by partial collection!")
+	}
+}

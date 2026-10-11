@@ -223,11 +223,12 @@ type Service struct {
 }
 
 type ServiceSpec struct {
-	Type       string            `json:"type,omitempty"` // ClusterIP, NodePort, LoadBalancer, ExternalName
-	ClusterIP  string            `json:"clusterIP,omitempty"`
-	ClusterIPs []string          `json:"clusterIPs,omitempty"`
-	Ports      []ServicePort     `json:"ports,omitempty"`
-	Selector   map[string]string `json:"selector,omitempty"`
+	Type                     string            `json:"type,omitempty"` // ClusterIP, NodePort, LoadBalancer, ExternalName
+	ClusterIP                string            `json:"clusterIP,omitempty"`
+	ClusterIPs               []string          `json:"clusterIPs,omitempty"`
+	Ports                    []ServicePort     `json:"ports,omitempty"`
+	Selector                 map[string]string `json:"selector,omitempty"`
+	PublishNotReadyAddresses bool              `json:"publishNotReadyAddresses,omitempty"`
 }
 
 type ServicePort struct {
@@ -374,6 +375,40 @@ type ObjectReference struct {
 
 type PersistentVolumeStatus struct {
 	Phase string `json:"phase,omitempty"` // Available, Bound, Released, Failed
+}
+
+// EndpointSlice represents a subset of the endpoints that implement a service.
+// From discovery.k8s.io/v1.
+type EndpointSlice struct {
+	ObjectMeta  ObjectMeta     `json:"metadata"`
+	AddressType string         `json:"addressType"` // IPv4, IPv6, FQDN
+	Endpoints   []Endpoint     `json:"endpoints"`
+	Ports       []EndpointPort `json:"ports,omitempty"`
+}
+
+// Endpoint represents a single logical network endpoint.
+type Endpoint struct {
+	Addresses  []string           `json:"addresses"`
+	Conditions EndpointConditions `json:"conditions,omitempty"`
+	Hostname   *string            `json:"hostname,omitempty"`
+	TargetRef  *ObjectReference   `json:"targetRef,omitempty"`
+	NodeName   *string            `json:"nodeName,omitempty"`
+	Zone       *string            `json:"zone,omitempty"`
+}
+
+// EndpointConditions represents conditions of an endpoint.
+type EndpointConditions struct {
+	Ready       *bool `json:"ready,omitempty"`
+	Serving     *bool `json:"serving,omitempty"`
+	Terminating *bool `json:"terminating,omitempty"`
+}
+
+// EndpointPort represents a port on an endpoint.
+type EndpointPort struct {
+	Name        *string `json:"name,omitempty"`
+	Port        *int32  `json:"port,omitempty"`
+	Protocol    *string `json:"protocol,omitempty"`
+	AppProtocol *string `json:"appProtocol,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

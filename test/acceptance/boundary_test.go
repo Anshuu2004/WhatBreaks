@@ -1283,3 +1283,223 @@ func TestBoundary_ScaleImpact_DiscoveredRuntimeTraffic(t *testing.T) {
 		t.Errorf("expected Insufficient outcome for unmatched connection evidence, got %v", respUnmatched.Results[0].GetOutcome())
 	}
 }
+
+// TestBoundary_EndpointSlice_RoutesTo_ScaleImpactIsolation verifies:
+// 1. EndpointSlice evidence discovers Service --ROUTES_TO--> Pod (category: Network).
+// 2. EndpointSlice NEVER emits CALLS relationships.
+// 3. SCALE impact on Service traverses runtime CALLS callers, but NEVER propagates across ROUTES_TO to backend Pods.
+// 4. Non-propagating boundary semantics under DELETE, UPDATE, and REPLACE are preserved.
+func TestBoundary_EndpointSlice_RoutesTo_ScaleImpactIsolation(t *testing.T) {
+	addr, err := allocateFreeAddr()
+	if err != nil {
+		t.Fatalf("failed to allocate free port: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	server := startManagedServer(t, addr)
+	defer server.Stop()
+
+	client, err := coreclient.Connect(ctx, addr)
+	if err != nil {
+		t.Fatalf("failed to connect to coreclient: %v", err)
+	}
+	defer client.Close()
+
+	workspaceID := "ws-endpointslice-impact-isolation"
+
+	// 1. Genuine runtime connection: client-pod -> 10.96.0.50:80 (service VIP)
+	connEv := makeConnEvidence("550e8400-e29b-41d4-a716-446655440061", "client-pod", "10.96.0.50", 80)
+
+	// 2. Service mapping evidence: payment-svc on 10.96.0.50:80
+	svcMapData, _ := json.Marshal(map[string]interface{}{
+		"address": "10.96.0.50",
+		"port":    80,
+	})
+	svcMapEv := &corev1.Evidence{
+		Id: "550e8400-e29b-41d4-a716-446655440062",
+		Source: &corev1.EvidenceSource{
+			Provider:  "kubernetes",
+			Collector: "k8s-collector",
+		},
+		ObservedAt:      "2026-10-04T12:00:01Z",
+		ObservationType: "RESOURCE_REFERENCE",
+		Subject: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderId:   "prod/payment-svc",
+		},
+		Data: svcMapData,
+	}
+
+	// 3. EndpointSlice evidence: payment-svc routes to payment-backend-pod
+	epSliceData, _ := json.Marshal(map[string]interface{}{
+		"reference_type": "endpoint_slice_member",
+		"service_name":   "payment-svc",
+		"is_routing":     true,
+		"address_type":   "IPv4",
+		"addresses":      []string{"10.244.1.15"},
+		"target": map[string]interface{}{
+			"provider":      "kubernetes",
+			"resource_type": "pod",
+			"provider_id":   "prod/payment-backend-pod",
+		},
+	})
+	epSliceEv := &corev1.Evidence{
+		Id: "550e8400-e29b-41d4-a716-446655440063",
+		Source: &corev1.EvidenceSource{
+			Provider:  "kubernetes",
+			Collector: "k8s-collector",
+		},
+		ObservedAt:      "2026-10-04T12:00:02Z",
+		ObservationType: "RESOURCE_REFERENCE",
+		Subject: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderId:   "prod/payment-svc",
+		},
+		Data: epSliceData,
+	}
+
+	// 4. Run discovery
+	discResp, err := client.RunDiscoveryWithEvidence(ctx, []*corev1.Evidence{connEv, svcMapEv, epSliceEv})
+	if err != nil {
+		t.Fatalf("RunDiscoveryWithEvidence failed: %v", err)
+	}
+
+	if len(discResp.Results) != 2 {
+		t.Fatalf("expected 2 discovered results (CALLS + ROUTES_TO), got %d", len(discResp.Results))
+	}
+
+	var callsFound, routesToFound bool
+	var discoveredRels []*corev1.Relationship
+
+	for _, res := range discResp.Results {
+		d := res.GetDiscovered()
+		if d == nil {
+			continue
+		}
+		rel := d.Relationship
+		discoveredRels = append(discoveredRels, rel)
+
+		if rel.Source.ProviderId == "payments/client-pod" && rel.Target.ProviderId == "prod/payment-svc" {
+			if rel.Kind != "CALLS" || rel.Category != "Invocation" {
+				t.Errorf("expected CALLS (Invocation), got %s (%s)", rel.Kind, rel.Category)
+			}
+			callsFound = true
+		}
+
+		if rel.Source.ProviderId == "prod/payment-svc" && rel.Target.ProviderId == "prod/payment-backend-pod" {
+			if rel.Kind != "ROUTES_TO" {
+				t.Errorf("expected ROUTES_TO from EndpointSlice, got %s", rel.Kind)
+			}
+			if rel.Category != "Network" {
+				t.Errorf("expected category Network for ROUTES_TO, got %s", rel.Category)
+			}
+			routesToFound = true
+		}
+
+		// Invariant: Never create CALLS from EndpointSlice
+		if rel.Source.ProviderId == "prod/payment-svc" && rel.Kind == "CALLS" {
+			t.Fatalf("CRITICAL INVARIANT VIOLATION: CALLS created from EndpointSlice evidence!")
+		}
+	}
+
+	if !callsFound {
+		t.Errorf("missing discovered CALLS relationship from client-pod to payment-svc")
+	}
+	if !routesToFound {
+		t.Errorf("missing discovered ROUTES_TO relationship from payment-svc to payment-backend-pod")
+	}
+
+	// 5. Load State into Core Engine
+	_, err = client.LoadState(ctx, &corev1.LoadStateRequest{
+		WorkspaceId:   workspaceID,
+		Relationships: discoveredRels,
+	})
+	if err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+
+	targetService := &corev1.ResourceIdentity{
+		Provider:     "kubernetes",
+		ResourceType: "service",
+		ProviderId:   "prod/payment-svc",
+	}
+	backendPod := &corev1.ResourceIdentity{
+		Provider:     "kubernetes",
+		ResourceType: "pod",
+		ProviderId:   "prod/payment-backend-pod",
+	}
+
+	// 6. SCALE Impact Analysis on payment-svc:
+	// Invariant: Traverses incoming CALLS to client-pod.
+	// Invariant: Does NOT propagate across ROUTES_TO to payment-backend-pod.
+	respScale, err := client.AnalyzeImpact(ctx, &corev1.AnalyzeImpactRequest{
+		Target:      targetService,
+		Direction:   "incoming",
+		MaxDepth:    5,
+		WorkspaceId: workspaceID,
+		ProposedChange: &corev1.ProposedChange{
+			ChangeType: corev1.ChangeType_CHANGE_TYPE_SCALE,
+			Details:    "scaling payment-svc replica count",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact SCALE failed: %v", err)
+	}
+
+	if respScale.Summary.ImpactedCount != 1 {
+		t.Fatalf("SCALE expected exactly 1 impacted resource (CALLS only), got %d", respScale.Summary.ImpactedCount)
+	}
+	if respScale.ImpactedResources[0].Resource.ProviderId != "payments/client-pod" {
+		t.Errorf("SCALE expected client-pod, got %s", respScale.ImpactedResources[0].Resource.ProviderId)
+	}
+
+	// Also verify outgoing SCALE on payment-svc does NOT reach backend-pod
+	respOutScale, err := client.AnalyzeImpact(ctx, &corev1.AnalyzeImpactRequest{
+		Target:      targetService,
+		Direction:   "outgoing",
+		MaxDepth:    5,
+		WorkspaceId: workspaceID,
+		ProposedChange: &corev1.ProposedChange{
+			ChangeType: corev1.ChangeType_CHANGE_TYPE_SCALE,
+			Details:    "scaling payment-svc outgoing",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact outgoing SCALE failed: %v", err)
+	}
+	if respOutScale.Summary.ImpactedCount != 0 {
+		t.Errorf("outgoing SCALE must not impact backend Pod, got %d", respOutScale.Summary.ImpactedCount)
+	}
+
+	// 7. Verify DELETE, UPDATE, and REPLACE on payment-svc:
+	// Incoming impact reaches caller (CALLS).
+	// None reach backend-pod across ROUTES_TO (Service is not a dependency of backend Pod).
+	for _, ct := range []corev1.ChangeType{
+		corev1.ChangeType_CHANGE_TYPE_DELETE,
+		corev1.ChangeType_CHANGE_TYPE_UPDATE,
+		corev1.ChangeType_CHANGE_TYPE_REPLACE,
+	} {
+		respChange, err := client.AnalyzeImpact(ctx, &corev1.AnalyzeImpactRequest{
+			Target:      targetService,
+			Direction:   "incoming",
+			MaxDepth:    5,
+			WorkspaceId: workspaceID,
+			ProposedChange: &corev1.ProposedChange{
+				ChangeType: ct,
+				Details:    fmt.Sprintf("testing %s", ct),
+			},
+		})
+		if err != nil {
+			t.Fatalf("AnalyzeImpact %s failed: %v", ct, err)
+		}
+		for _, imp := range respChange.ImpactedResources {
+			if imp.Resource.ProviderId == backendPod.ProviderId {
+				t.Errorf("change %s improperly reached backend Pod across ROUTES_TO", ct)
+			}
+		}
+	}
+}
