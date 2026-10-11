@@ -278,11 +278,11 @@ func TestRunDiscovery_Discovered(t *testing.T) {
 	}
 
 	// Verify relationship kind & category
-	if rel.GetKind() != "DEPENDS_ON" {
-		t.Errorf("expected kind DEPENDS_ON, got %q", rel.GetKind())
+	if rel.GetKind() != "CALLS" {
+		t.Errorf("expected kind CALLS, got %q", rel.GetKind())
 	}
-	if rel.GetCategory() != "Dependency" {
-		t.Errorf("expected category Dependency, got %q", rel.GetCategory())
+	if rel.GetCategory() != "Invocation" {
+		t.Errorf("expected category Invocation, got %q", rel.GetCategory())
 	}
 
 	// Verify supporting evidence IDs

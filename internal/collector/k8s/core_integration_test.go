@@ -171,11 +171,12 @@ func TestCollector_CoreEngineIntegration(t *testing.T) {
 	}
 
 	// Verify that RuntimeConnectionRule in Rust discovered:
-	// api-backend --DEPENDS_ON--> postgres-service!
+	// api-backend --CALLS--> postgres-service!
 	foundRelationship := false
 	for _, res := range resp.Results {
 		if rel := res.GetDiscovered(); rel != nil {
-			if rel.Relationship.Kind == "DEPENDS_ON" &&
+			if rel.Relationship.Kind == "CALLS" &&
+				rel.Relationship.Category == "Invocation" &&
 				rel.Relationship.Source.ProviderId == "cluster-prod/production/api-backend" &&
 				rel.Relationship.Target.ProviderId == "cluster-prod/production/postgres-service" {
 				foundRelationship = true

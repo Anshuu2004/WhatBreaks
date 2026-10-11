@@ -3,6 +3,8 @@ package state
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
@@ -15,11 +17,18 @@ type CoreLoader interface {
 	LoadState(ctx context.Context, req *corev1.LoadStateRequest, opts ...grpc.CallOption) (*corev1.LoadStateResponse, error)
 }
 
+type workspaceLock struct {
+	sem      chan struct{}
+	refCount int
+}
+
 // Materializer loads authoritative state from Store and materializes it into the Rust Core Engine.
 type Materializer struct {
-	store  Store
-	client CoreLoader
-	logger logging.Logger
+	store      Store
+	client     CoreLoader
+	logger     logging.Logger
+	registryMu sync.Mutex
+	locks      map[string]*workspaceLock
 }
 
 // NewMaterializer constructs a Materializer instance.
@@ -31,28 +40,101 @@ func NewMaterializer(store Store, client CoreLoader, logger logging.Logger) *Mat
 		store:  store,
 		client: client,
 		logger: logger,
+		locks:  make(map[string]*workspaceLock),
 	}
 }
 
+// acquireWorkspaceLock serializes materializations for the same workspaceID while allowing
+// different workspaces to materialize concurrently. It uses ref-counted channel semaphores
+// to cleanly prune idle entries without memory leaks or unbounded map growth.
+func (m *Materializer) acquireWorkspaceLock(ctx context.Context, ws string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	m.registryMu.Lock()
+	if m.locks == nil {
+		m.locks = make(map[string]*workspaceLock)
+	}
+	lock, ok := m.locks[ws]
+	if !ok {
+		lock = &workspaceLock{
+			sem: make(chan struct{}, 1),
+		}
+		lock.sem <- struct{}{}
+		m.locks[ws] = lock
+	}
+	lock.refCount++
+	m.registryMu.Unlock()
+
+	select {
+	case <-lock.sem:
+		// Acquired workspace lock
+	case <-ctx.Done():
+		m.registryMu.Lock()
+		lock.refCount--
+		if lock.refCount == 0 {
+			delete(m.locks, ws)
+		}
+		m.registryMu.Unlock()
+		return nil, ctx.Err()
+	}
+
+	var once sync.Once
+	unlock := func() {
+		once.Do(func() {
+			lock.sem <- struct{}{}
+			m.registryMu.Lock()
+			lock.refCount--
+			if lock.refCount == 0 {
+				delete(m.locks, ws)
+			}
+			m.registryMu.Unlock()
+		})
+	}
+
+	return unlock, nil
+}
+
+// ActiveLockCount returns the count of active workspace lock entries in the registry.
+// Useful for observability, monitoring, and test assertions.
+func (m *Materializer) ActiveLockCount() int {
+	m.registryMu.Lock()
+	defer m.registryMu.Unlock()
+	return len(m.locks)
+}
+
 // Materialize loads the full assembled state for workspaceID from the store and
-// pushes it to the Rust Core Engine over gRPC.
+// pushes it to the Rust Core Engine over gRPC. It acquires a workspace-scoped
+// lock to prevent concurrent or out-of-order materializations for the same workspace.
 func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*corev1.LoadStateResponse, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrEmptyWorkspace
+	}
+
 	if m.client == nil {
 		return nil, fmt.Errorf("materializer: core client is not configured")
 	}
 
+	unlock, err := m.acquireWorkspaceLock(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	start := time.Now()
-	state, err := m.store.LoadAssembledState(ctx, workspaceID)
+	state, err := m.store.LoadAssembledState(ctx, ws)
 	if err != nil {
 		m.logger.Error("Failed to load assembled state from store",
-			"workspace_id", workspaceID,
+			"workspace_id", ws,
 			"error", err.Error(),
 		)
 		return nil, fmt.Errorf("materializer failed to load state: %w", err)
 	}
 
 	protoReq := &corev1.LoadStateRequest{
-		WorkspaceId:   workspaceID,
+		WorkspaceId:   ws,
 		Relationships: make([]*corev1.Relationship, 0, len(state.Relationships)),
 		Associations:  make([]*corev1.RelationshipEvidence, 0, len(state.Relationships)),
 		Evidence:      make([]*corev1.Evidence, 0, len(state.Evidence)),
@@ -123,7 +205,7 @@ func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*co
 
 	if err != nil {
 		m.logger.Error("Failed to materialize state to Core Engine",
-			"workspace_id", workspaceID,
+			"workspace_id", ws,
 			"duration_ms", duration.Milliseconds(),
 			"error", err.Error(),
 		)
@@ -131,7 +213,7 @@ func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*co
 	}
 
 	m.logger.Info("Materialized state to Core Engine successfully",
-		"workspace_id", workspaceID,
+		"workspace_id", ws,
 		"relationships_loaded", resp.RelationshipsLoaded,
 		"evidence_loaded", resp.EvidenceLoaded,
 		"provenance_links_loaded", resp.ProvenanceLinksLoaded,

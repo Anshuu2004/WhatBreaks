@@ -127,8 +127,8 @@ async fn test_rpc_discovered_relationship() {
             assert_eq!(tgt.provider_id, "arn:aws:rds:us-east-1:123:payments-db");
 
             // Verify relationship kind & category
-            assert_eq!(rel.kind, "DEPENDS_ON");
-            assert_eq!(rel.category, "Dependency");
+            assert_eq!(rel.kind, "CALLS");
+            assert_eq!(rel.category, "Invocation");
 
             // Verify supporting evidence IDs
             assert_eq!(dr.supporting_evidence_ids.len(), 2);
@@ -421,8 +421,8 @@ async fn test_in_process_grpc_server_and_client_roundtrip() {
     match &resp.results[0].outcome {
         Some(proto::discovery_result::Outcome::Discovered(dr)) => {
             let rel = dr.relationship.as_ref().unwrap();
-            assert_eq!(rel.kind, "DEPENDS_ON");
-            assert_eq!(rel.category, "Dependency");
+            assert_eq!(rel.kind, "CALLS");
+            assert_eq!(rel.category, "Invocation");
             assert_eq!(dr.supporting_evidence_ids.len(), 2);
         }
         other => panic!("expected Discovered outcome over wire, got {:?}", other),

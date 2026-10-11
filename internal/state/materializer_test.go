@@ -3,6 +3,7 @@ package state_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,20 +13,34 @@ import (
 )
 
 type mockCoreLoader struct {
-	lastReq   *corev1.LoadStateRequest
-	resp      *corev1.LoadStateResponse
-	err       error
-	callCount int
+	mu          sync.Mutex
+	lastReq     *corev1.LoadStateRequest
+	resp        *corev1.LoadStateResponse
+	err         error
+	callCount   int
+	onLoadState func(ctx context.Context, req *corev1.LoadStateRequest) error
 }
 
 func (m *mockCoreLoader) LoadState(ctx context.Context, req *corev1.LoadStateRequest, opts ...grpc.CallOption) (*corev1.LoadStateResponse, error) {
+	m.mu.Lock()
 	m.callCount++
 	m.lastReq = req
-	if m.err != nil {
-		return nil, m.err
+	onLoad := m.onLoadState
+	err := m.err
+	resp := m.resp
+	m.mu.Unlock()
+
+	if onLoad != nil {
+		if hookErr := onLoad(ctx, req); hookErr != nil {
+			return nil, hookErr
+		}
 	}
-	if m.resp != nil {
-		return m.resp, nil
+
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil {
+		return resp, nil
 	}
 	return &corev1.LoadStateResponse{
 		WorkspaceId:           req.WorkspaceId,
@@ -33,6 +48,24 @@ func (m *mockCoreLoader) LoadState(ctx context.Context, req *corev1.LoadStateReq
 		EvidenceLoaded:        uint32(len(req.Evidence)),
 		ProvenanceLinksLoaded: uint32(len(req.Associations)),
 	}, nil
+}
+
+func (m *mockCoreLoader) getLastReq() *corev1.LoadStateRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastReq
+}
+
+type hookStore struct {
+	state.Store
+	onLoadAssembledState func(ctx context.Context, workspaceID string)
+}
+
+func (h *hookStore) LoadAssembledState(ctx context.Context, workspaceID string) (*state.AssembledState, error) {
+	if h.onLoadAssembledState != nil {
+		h.onLoadAssembledState(ctx, workspaceID)
+	}
+	return h.Store.LoadAssembledState(ctx, workspaceID)
 }
 
 func TestMaterializer_Materialize_Success(t *testing.T) {
@@ -254,4 +287,451 @@ func TestReconciler_Rematerialize_Validation(t *testing.T) {
 		t.Errorf("expected 1 call to CoreLoader, got %d", loader.callCount)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CONCURRENCY & MATERIALIZATION ORDERING REGRESSION TESTS
+// ---------------------------------------------------------------------------
+
+// TEST A: SAME-WORKSPACE MATERIALIZATION SERIALIZATION
+// Proves that materializations targeting the same workspace cannot interleave,
+// and that B reads its authoritative snapshot only after A releases the lock.
+func TestMaterializer_Concurrency_SameWorkspaceSerialized(t *testing.T) {
+	ctx := context.Background()
+	baseStore := state.NewMemoryStore()
+	ws := "ws-serialize-test"
+
+	res := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderID:   "svc-a",
+		},
+	}
+	_ = baseStore.SaveResources(ctx, ws, []state.Resource{res})
+
+	aEnteredLoadState := make(chan struct{})
+	aReleaseLoadState := make(chan struct{})
+	bEnteredSnapshotRead := make(chan struct{}, 1)
+
+	hStore := &hookStore{
+		Store: baseStore,
+		onLoadAssembledState: func(ctx context.Context, workspaceID string) {
+			select {
+			case <-aEnteredLoadState:
+				// If A already entered LoadState, this is B reading its snapshot
+				bEnteredSnapshotRead <- struct{}{}
+			default:
+				// This is A reading snapshot initially
+			}
+		},
+	}
+
+	loader := &mockCoreLoader{
+		onLoadState: func(ctx context.Context, req *corev1.LoadStateRequest) error {
+			if req.WorkspaceId == ws {
+				select {
+				case <-aEnteredLoadState:
+					// Second call (B)
+				default:
+					close(aEnteredLoadState)
+					<-aReleaseLoadState
+				}
+			}
+			return nil
+		},
+	}
+
+	mat := state.NewMaterializer(hStore, loader, nil)
+
+	// Start Materialization A
+	errA := make(chan error, 1)
+	go func() {
+		_, err := mat.Materialize(ctx, ws)
+		errA <- err
+	}()
+
+	// Wait until A has acquired lock, loaded snapshot, and is holding lock inside LoadState
+	<-aEnteredLoadState
+
+	// Now start Materialization B in background
+	errB := make(chan error, 1)
+	go func() {
+		_, err := mat.Materialize(ctx, ws)
+		errB <- err
+	}()
+
+	// Verify B CANNOT enter snapshot read while A is holding lock
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-bEnteredSnapshotRead:
+		t.Fatalf("RACE VIOLATION: Materialization B entered snapshot read before A released lock!")
+	default:
+		// Expected: B is blocked waiting for lock
+	}
+
+	// Release Materialization A
+	close(aReleaseLoadState)
+
+	if err := <-errA; err != nil {
+		t.Fatalf("Materialization A failed: %v", err)
+	}
+
+	// Now B must unblock, read snapshot, and complete
+	select {
+	case <-bEnteredSnapshotRead:
+		// Expected! B read snapshot after A released lock
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for B to enter snapshot read")
+	}
+
+	if err := <-errB; err != nil {
+		t.Fatalf("Materialization B failed: %v", err)
+	}
+
+	if loader.callCount != 2 {
+		t.Errorf("expected 2 LoadState calls, got %d", loader.callCount)
+	}
+}
+
+// TEST B: NEWEST STATE WINS
+// Simulates an older materialization overlapping with a newer reconciliation,
+// proving that the final state observed by Core Engine represents the newest
+// committed PostgreSQL state and an older snapshot cannot overwrite it.
+func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
+	ctx := context.Background()
+	baseStore := state.NewMemoryStore()
+	ws := "ws-newest-wins"
+
+	// Initial State 1 in store: pod-v1
+	resV1 := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "pod-v1",
+		},
+	}
+	_ = baseStore.SaveResources(ctx, ws, []state.Resource{resV1})
+
+	aInLoadState := make(chan struct{})
+	aRelease := make(chan struct{})
+
+	loader := &mockCoreLoader{
+		onLoadState: func(ctx context.Context, req *corev1.LoadStateRequest) error {
+			// If this is request containing only pod-v1 (older snapshot)
+			if len(req.Relationships) == 0 && len(req.Associations) == 0 {
+				select {
+				case <-aInLoadState:
+				default:
+					close(aInLoadState)
+					<-aRelease
+				}
+			}
+			return nil
+		},
+	}
+
+	mat := state.NewMaterializer(baseStore, loader, nil)
+	reconciler := state.NewReconciler(baseStore, nil, mat, nil)
+
+	// Start Materialization A (older state)
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := mat.Materialize(ctx, ws)
+		doneA <- err
+	}()
+
+	// Wait until A has loaded State 1 from store and is paused in LoadState
+	<-aInLoadState
+
+	// Now while A is paused in LoadState, Reconciliation B commits State 2 to PostgreSQL/store
+	// and invokes ReconcileAndMaterialize
+	t0 := time.Now().UTC()
+	podV2Ev := newTestEvidence("ev-v2", "kubernetes", "pod", "pod-v2", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	batchB := state.ObservationBatch{
+		WorkspaceID: ws,
+		Evidence:    []*corev1.Evidence{podV2Ev},
+	}
+
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := reconciler.ReconcileAndMaterialize(ctx, batchB)
+		doneB <- err
+	}()
+
+	// Give B a moment to commit to store and attempt to acquire materialization lock
+	time.Sleep(20 * time.Millisecond)
+
+	// Now release Materialization A
+	close(aRelease)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("Materialization A failed: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("ReconcileAndMaterialize B failed: %v", err)
+	}
+
+	// Verify the final request sent to CoreLoader
+	lastReq := loader.getLastReq()
+	if lastReq == nil {
+		t.Fatalf("expected lastReq to be non-nil")
+	}
+
+	// In the final state, pod-v2 MUST be present because B read the fresh snapshot after A finished!
+	hasPodV2 := false
+	for _, ev := range lastReq.Evidence {
+		if ev.Subject != nil && ev.Subject.ProviderId == "pod-v2" {
+			hasPodV2 = true
+			break
+		}
+	}
+	if !hasPodV2 {
+		t.Fatalf("CORRECTNESS REGRESSION: older snapshot A overwrote newer snapshot B! lastReq evidence: %+v", lastReq.Evidence)
+	}
+}
+
+// TEST C: WORKSPACE ISOLATION
+// Verifies that materialization for workspace B can proceed and finish
+// while workspace A is blocked inside materialization.
+func TestMaterializer_Concurrency_WorkspaceIsolation(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+
+	wsAlpha := "ws-alpha"
+	wsBeta := "ws-beta"
+
+	_ = store.SaveResources(ctx, wsAlpha, []state.Resource{{WorkspaceID: wsAlpha, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-a"}}})
+	_ = store.SaveResources(ctx, wsBeta, []state.Resource{{WorkspaceID: wsBeta, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-b"}}})
+
+	alphaPaused := make(chan struct{})
+	alphaProceed := make(chan struct{})
+
+	loader := &mockCoreLoader{
+		onLoadState: func(ctx context.Context, req *corev1.LoadStateRequest) error {
+			if req.WorkspaceId == wsAlpha {
+				close(alphaPaused)
+				<-alphaProceed
+			}
+			return nil
+		},
+	}
+
+	mat := state.NewMaterializer(store, loader, nil)
+
+	// Start Materialize for wsAlpha in background
+	doneAlpha := make(chan error, 1)
+	go func() {
+		_, err := mat.Materialize(ctx, wsAlpha)
+		doneAlpha <- err
+	}()
+
+	// Wait until wsAlpha is blocked in LoadState
+	<-alphaPaused
+
+	// Now call Materialize for wsBeta on main thread: MUST NOT BLOCK!
+	betaDone := make(chan error, 1)
+	go func() {
+		_, err := mat.Materialize(ctx, wsBeta)
+		betaDone <- err
+	}()
+
+	select {
+	case err := <-betaDone:
+		if err != nil {
+			t.Fatalf("wsBeta failed: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("ISOLATION VIOLATION: wsBeta blocked on wsAlpha materialization lock!")
+	}
+
+	// Release wsAlpha
+	close(alphaProceed)
+	if err := <-doneAlpha; err != nil {
+		t.Fatalf("wsAlpha failed: %v", err)
+	}
+}
+
+// TEST D: ERROR AND CANCELLATION
+// Verifies that locks are released upon errors and cancellations, allowing
+// subsequent materializations to proceed, and that lock entries are pruned.
+func TestMaterializer_Concurrency_ErrorAndCancellation(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	ws := "ws-err-cancel"
+
+	_ = store.SaveResources(ctx, ws, []state.Resource{{WorkspaceID: ws, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-1"}}})
+
+	// Part 1: Error release
+	loaderErr := errors.New("gRPC core load error")
+	loader := &mockCoreLoader{err: loaderErr}
+	mat := state.NewMaterializer(store, loader, nil)
+
+	_, err := mat.Materialize(ctx, ws)
+	if err == nil {
+		t.Fatalf("expected error from loader, got nil")
+	}
+
+	// Verify lock was released and registry cleaned up
+	if count := mat.ActiveLockCount(); count != 0 {
+		t.Errorf("expected 0 active locks after error return, got %d", count)
+	}
+
+	// Immediate next materialization must succeed
+	loader.err = nil
+	resp, err := mat.Materialize(ctx, ws)
+	if err != nil {
+		t.Fatalf("subsequent materialization after error failed: %v", err)
+	}
+	if resp == nil {
+		t.Fatalf("expected non-nil response")
+	}
+	if count := mat.ActiveLockCount(); count != 0 {
+		t.Errorf("expected 0 active locks after success, got %d", count)
+	}
+
+	// Part 2: Context cancellation while waiting for lock
+	aInLoadState := make(chan struct{})
+	aProceed := make(chan struct{})
+
+	loader.onLoadState = func(ctx context.Context, req *corev1.LoadStateRequest) error {
+		select {
+		case <-aInLoadState:
+		default:
+			close(aInLoadState)
+			<-aProceed
+		}
+		return nil
+	}
+
+	go func() {
+		_, _ = mat.Materialize(context.Background(), ws)
+	}()
+
+	<-aInLoadState
+
+	// Start B with cancellable context
+	ctxB, cancelB := context.WithCancel(context.Background())
+	errB := make(chan error, 1)
+	go func() {
+		_, err := mat.Materialize(ctxB, ws)
+		errB <- err
+	}()
+
+	// Cancel B while waiting
+	time.Sleep(10 * time.Millisecond)
+	cancelB()
+
+	select {
+	case err := <-errB:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled for B, got %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for cancelled B to return")
+	}
+
+	// Unblock A
+	close(aProceed)
+
+	// Subsequent materialization C with valid context succeeds
+	respC, errC := mat.Materialize(context.Background(), ws)
+	if errC != nil {
+		t.Fatalf("Materialization C failed: %v", errC)
+	}
+	if respC == nil {
+		t.Fatalf("expected non-nil response for C")
+	}
+
+	// When all complete, lock registry must be 0
+	if count := mat.ActiveLockCount(); count != 0 {
+		t.Errorf("expected 0 active locks after all completed, got %d", count)
+	}
+}
+
+// TEST E: ALL ENTRY POINTS SHARE THE SAME LOCK
+// Proves that direct Materialize, ReconcileAndMaterialize, and Rematerialize all
+// serialize on the same lock and cannot bypass each other.
+func TestMaterializer_Concurrency_AllEntryPointsShareLock(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewMemoryStore()
+	ws := "ws-entrypoints"
+
+	_ = store.SaveResources(ctx, ws, []state.Resource{{WorkspaceID: ws, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-entry"}}})
+
+	blockLoadState := make(chan struct{})
+	releaseLoadState := make(chan struct{})
+
+	loader := &mockCoreLoader{
+		onLoadState: func(ctx context.Context, req *corev1.LoadStateRequest) error {
+			select {
+			case <-blockLoadState:
+			default:
+				close(blockLoadState)
+				<-releaseLoadState
+			}
+			return nil
+		},
+	}
+
+	mat := state.NewMaterializer(store, loader, nil)
+	reconciler := state.NewReconciler(store, nil, mat, nil)
+
+	// 1. Start direct Materialize call, pause it
+	go func() {
+		_, _ = mat.Materialize(ctx, ws)
+	}()
+	<-blockLoadState
+
+	// 2. Call reconciler.Rematerialize: MUST BLOCK because Materialize holds the lock
+	rematStarted := make(chan struct{})
+	rematDone := make(chan error, 1)
+	go func() {
+		close(rematStarted)
+		rematDone <- reconciler.Rematerialize(ctx, ws)
+	}()
+	<-rematStarted
+
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-rematDone:
+		t.Fatalf("LOCK BYPASS: reconciler.Rematerialize did not wait for Materializer lock!")
+	default:
+		// Expected to be blocked
+	}
+
+	// 3. Call reconciler.ReconcileAndMaterialize: MUST ALSO BLOCK at materialization
+	recMatDone := make(chan error, 1)
+	go func() {
+		batch := state.ObservationBatch{
+			WorkspaceID: ws,
+			Evidence: []*corev1.Evidence{
+				newTestEvidence("ev-entry-2", "k8s", "pod", "p-entry", "CONTROL_PLANE_OBJECT", `{}`, time.Now().UTC()),
+			},
+		}
+		_, err := reconciler.ReconcileAndMaterialize(ctx, batch)
+		recMatDone <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-recMatDone:
+		t.Fatalf("LOCK BYPASS: ReconcileAndMaterialize did not wait for Materializer lock!")
+	default:
+		// Expected to be blocked
+	}
+
+	// Now release the initial lock
+	close(releaseLoadState)
+
+	// Both Rematerialize and ReconcileAndMaterialize must finish cleanly
+	if err := <-rematDone; err != nil {
+		t.Fatalf("Rematerialize failed: %v", err)
+	}
+	if err := <-recMatDone; err != nil {
+		t.Fatalf("ReconcileAndMaterialize failed: %v", err)
+	}
+}
+
 

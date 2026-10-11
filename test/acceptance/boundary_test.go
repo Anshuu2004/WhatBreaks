@@ -284,11 +284,11 @@ func TestAcceptance_A_CompleteDiscoveryFlow(t *testing.T) {
 		t.Errorf("target mismatch: got %+v", tgt)
 	}
 
-	if rel.GetKind() != "DEPENDS_ON" {
-		t.Errorf("kind mismatch: expected DEPENDS_ON, got %s", rel.GetKind())
+	if rel.GetKind() != "CALLS" {
+		t.Errorf("kind mismatch: expected CALLS, got %s", rel.GetKind())
 	}
-	if rel.GetCategory() != "Dependency" {
-		t.Errorf("category mismatch: expected Dependency, got %s", rel.GetCategory())
+	if rel.GetCategory() != "Invocation" {
+		t.Errorf("category mismatch: expected Invocation, got %s", rel.GetCategory())
 	}
 
 	// Verify supporting evidence IDs
@@ -1087,5 +1087,199 @@ func TestBoundary_AnalyzeImpact_ChangeAware(t *testing.T) {
 	}
 	if !hasDepExplanation {
 		t.Errorf("expected limitation explaining DEPENDS_ON exclusion, got: %+v", respScaleB.ChangeAssessment.Limitations)
+	}
+}
+
+// TestBoundary_ScaleImpact_DiscoveredRuntimeTraffic validates that:
+// 1. RuntimeConnectionRule discovers CALLS (Invocation) relationships from genuine runtime evidence.
+// 2. ResourceReferenceRule discovers DEPENDS_ON (Dependency) relationships from declarative references.
+// 3. Loading these discovered relationships into CoreEngine allows SCALE impact analysis
+//    to traverse runtime callers (CALLS) while strictly suppressing declarative dependencies (DEPENDS_ON).
+// 4. DELETE impact analysis traverses BOTH runtime callers and declarative dependencies.
+// 5. Incomplete/unmatched runtime evidence yields Insufficient evidence without creating speculative CALLS.
+func TestBoundary_ScaleImpact_DiscoveredRuntimeTraffic(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	addr, err := allocateFreeAddr()
+	if err != nil {
+		t.Fatalf("failed to allocate port: %v", err)
+	}
+
+	server := startManagedServer(t, addr)
+	defer server.Stop()
+
+	client, err := coreclient.Connect(ctx, addr)
+	if err != nil {
+		t.Fatalf("failed to connect to server: %v", err)
+	}
+	defer client.Close()
+
+	workspaceID := "scale-discovered-traffic-test"
+
+	// 1. Prepare genuine runtime connection evidence: caller-pod -> 10.0.1.50:8080
+	connEv := makeConnEvidence("550e8400-e29b-41d4-a716-446655440051", "caller-pod", "10.0.1.50", 8080)
+	// Mapping evidence: backend-service exposed on 10.0.1.50:8080
+	mapData, _ := json.Marshal(map[string]interface{}{
+		"address": "10.0.1.50",
+		"port":    8080,
+	})
+	mapEv := &corev1.Evidence{
+		Id: "550e8400-e29b-41d4-a716-446655440052",
+		Source: &corev1.EvidenceSource{
+			Provider:  "kubernetes",
+			Collector: "k8s-endpoint",
+		},
+		ObservedAt:      "2026-10-04T12:00:01Z",
+		ObservationType: "RESOURCE_REFERENCE",
+		Subject: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "service",
+			ProviderId:   "payments/backend-service",
+		},
+		Data: mapData,
+	}
+
+	// 2. Prepare declarative resource reference evidence: config-dep references backend-service
+	refData, _ := json.Marshal(map[string]interface{}{
+		"target": map[string]interface{}{
+			"provider":      "kubernetes",
+			"resource_type": "service",
+			"provider_id":   "payments/backend-service",
+		},
+	})
+	refEv := &corev1.Evidence{
+		Id: "550e8400-e29b-41d4-a716-446655440053",
+		Source: &corev1.EvidenceSource{
+			Provider:  "kubernetes",
+			Collector: "k8s-manifest",
+		},
+		ObservedAt:      "2026-10-04T12:00:02Z",
+		ObservationType: "RESOURCE_REFERENCE",
+		Subject: &corev1.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "deployment",
+			ProviderId:   "payments/config-dep",
+		},
+		Data: refData,
+	}
+
+	// 3. Run discovery with evidence
+	discResp, err := client.RunDiscoveryWithEvidence(ctx, []*corev1.Evidence{connEv, mapEv, refEv})
+	if err != nil {
+		t.Fatalf("RunDiscoveryWithEvidence failed: %v", err)
+	}
+
+	if len(discResp.Results) != 2 {
+		t.Fatalf("expected 2 discovered relationships, got %d", len(discResp.Results))
+	}
+
+	var discoveredRels []*corev1.Relationship
+	for _, res := range discResp.Results {
+		dr := res.GetDiscovered()
+		if dr == nil {
+			t.Fatalf("expected Discovered result, got %v", res.GetOutcome())
+		}
+		discoveredRels = append(discoveredRels, dr.Relationship)
+	}
+
+	// Verify CALLS for runtime traffic and DEPENDS_ON for declarative reference
+	var callsFound, dependsFound bool
+	for _, rel := range discoveredRels {
+		if rel.Source.ProviderId == "payments/caller-pod" && rel.Target.ProviderId == "payments/backend-service" {
+			if rel.Kind != "CALLS" {
+				t.Errorf("runtime connection expected kind CALLS, got %s", rel.Kind)
+			}
+			if rel.Category != "Invocation" {
+				t.Errorf("runtime connection expected category Invocation, got %s", rel.Category)
+			}
+			callsFound = true
+		}
+		if rel.Source.ProviderId == "payments/config-dep" && rel.Target.ProviderId == "payments/backend-service" {
+			if rel.Kind != "DEPENDS_ON" {
+				t.Errorf("declarative ref expected kind DEPENDS_ON, got %s", rel.Kind)
+			}
+			if rel.Category != "Dependency" {
+				t.Errorf("declarative ref expected category Dependency, got %s", rel.Category)
+			}
+			dependsFound = true
+		}
+	}
+	if !callsFound {
+		t.Errorf("missing discovered CALLS relationship from runtime connection")
+	}
+	if !dependsFound {
+		t.Errorf("missing discovered DEPENDS_ON relationship from declarative reference")
+	}
+
+	// 4. Materialize / Load discovered state into Core Engine
+	_, err = client.LoadState(ctx, &corev1.LoadStateRequest{
+		WorkspaceId:   workspaceID,
+		Relationships: discoveredRels,
+	})
+	if err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+
+	targetService := &corev1.ResourceIdentity{
+		Provider:     "kubernetes",
+		ResourceType: "service",
+		ProviderId:   "payments/backend-service",
+	}
+
+	// 5. SCALE Impact Analysis: Must reach caller-pod (CALLS) and suppress config-dep (DEPENDS_ON)
+	respScale, err := client.AnalyzeImpact(ctx, &corev1.AnalyzeImpactRequest{
+		Target:      targetService,
+		Direction:   "incoming",
+		MaxDepth:    5,
+		WorkspaceId: workspaceID,
+		ProposedChange: &corev1.ProposedChange{
+			ChangeType: corev1.ChangeType_CHANGE_TYPE_SCALE,
+			Details:    "scaling backend-service pods",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact SCALE failed: %v", err)
+	}
+
+	if respScale.Summary.ImpactedCount != 1 {
+		t.Fatalf("SCALE expected exactly 1 impacted resource (CALLS only), got %d", respScale.Summary.ImpactedCount)
+	}
+	if respScale.ImpactedResources[0].Resource.ProviderId != "payments/caller-pod" {
+		t.Errorf("SCALE expected caller-pod impacted, got %s", respScale.ImpactedResources[0].Resource.ProviderId)
+	}
+	if respScale.ImpactedResources[0].Depth != 1 {
+		t.Errorf("SCALE expected depth 1, got %d", respScale.ImpactedResources[0].Depth)
+	}
+
+	// 6. DELETE Impact Analysis: Must reach BOTH caller-pod and config-dep
+	respDelete, err := client.AnalyzeImpact(ctx, &corev1.AnalyzeImpactRequest{
+		Target:      targetService,
+		Direction:   "incoming",
+		MaxDepth:    5,
+		WorkspaceId: workspaceID,
+		ProposedChange: &corev1.ProposedChange{
+			ChangeType: corev1.ChangeType_CHANGE_TYPE_DELETE,
+			Details:    "deleting backend-service",
+		},
+	})
+	if err != nil {
+		t.Fatalf("AnalyzeImpact DELETE failed: %v", err)
+	}
+	if respDelete.Summary.ImpactedCount != 2 {
+		t.Fatalf("DELETE expected 2 impacted resources, got %d", respDelete.Summary.ImpactedCount)
+	}
+
+	// 7. Verify negative case: connection evidence without matching mapping does NOT produce speculative CALLS
+	unmatchedConn := makeConnEvidence("550e8400-e29b-41d4-a716-446655440054", "orphan-pod", "10.0.99.99", 9090)
+	respUnmatched, err := client.RunDiscoveryWithEvidence(ctx, []*corev1.Evidence{unmatchedConn})
+	if err != nil {
+		t.Fatalf("RunDiscoveryWithEvidence unmatched failed: %v", err)
+	}
+	if len(respUnmatched.Results) != 1 {
+		t.Fatalf("expected 1 result for unmatched connection, got %d", len(respUnmatched.Results))
+	}
+	if respUnmatched.Results[0].GetInsufficient() == nil {
+		t.Errorf("expected Insufficient outcome for unmatched connection evidence, got %v", respUnmatched.Results[0].GetOutcome())
 	}
 }

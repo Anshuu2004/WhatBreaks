@@ -42,7 +42,7 @@
 //! (with `address` + `port`) that maps the same endpoint to a known resource,
 //! derive:
 //! ```text
-//! source --DEPENDS_ON--> target
+//! source --CALLS--> target
 //! ```
 //!
 //! [`Evidence`]: crate::evidence::Evidence
@@ -241,7 +241,7 @@ impl Endpoint {
 // RuntimeConnectionRule
 // ---------------------------------------------------------------------------
 
-/// Derives `source --DEPENDS_ON--> target` from two evidence observations:
+/// Derives `source --CALLS--> target` from two evidence observations:
 ///
 /// 1. A [`ObservationType::RUNTIME_CONNECTION`] observation on `source` that
 ///    records a `destination` address and `port` in its `data`.
@@ -344,7 +344,7 @@ impl DiscoveryRule for RuntimeConnectionRule {
                     let relationship = Relationship::new(
                         conn_ev.subject.clone(),
                         target_identity.clone(),
-                        RelationshipKind::DEPENDS_ON,
+                        RelationshipKind::CALLS,
                     );
 
                     results.push(DiscoveryResult::Discovered(DiscoveredRelationship::new(
@@ -852,10 +852,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 1. Runtime connection + resource mapping discovers DEPENDS_ON.
+    // 1. Runtime connection + resource mapping discovers CALLS.
     // -----------------------------------------------------------------------
     #[test]
-    fn test_runtime_connection_mapping_discovers_depends_on() {
+    fn test_runtime_connection_mapping_discovers_calls() {
         let pod = pod_identity("payments-api");
         let db = db_identity("payments-db");
 
@@ -869,7 +869,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].is_discovered());
         let dr = results[0].discovered().unwrap();
-        assert_eq!(dr.relationship.kind, RelationshipKind::DEPENDS_ON);
+        assert_eq!(dr.relationship.kind, RelationshipKind::CALLS);
+        assert_eq!(
+            dr.relationship.category,
+            crate::relationship::RelationshipCategory::Invocation
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -923,10 +927,10 @@ mod tests {
         let results = rule.apply(&[conn, map]);
 
         let dr = results[0].discovered().unwrap();
-        assert_eq!(dr.relationship.kind, RelationshipKind::DEPENDS_ON);
+        assert_eq!(dr.relationship.kind, RelationshipKind::CALLS);
         assert_eq!(
             dr.relationship.category,
-            crate::relationship::RelationshipCategory::Dependency
+            crate::relationship::RelationshipCategory::Invocation
         );
     }
 
@@ -1168,7 +1172,7 @@ mod tests {
         // Relationship fields are exactly what we expect — no extra fields added
         assert_eq!(dr.relationship.source, pod);
         assert_eq!(dr.relationship.target, db);
-        assert_eq!(dr.relationship.kind, RelationshipKind::DEPENDS_ON);
+        assert_eq!(dr.relationship.kind, RelationshipKind::CALLS);
         // No evidence inside Relationship itself
         // (verified at compile time — Relationship has no evidence field)
     }
@@ -1224,7 +1228,7 @@ mod tests {
         let dr = results[0].discovered().unwrap();
         assert_eq!(dr.relationship.source, pod);
         assert_eq!(dr.relationship.target, db);
-        assert_eq!(dr.relationship.kind, RelationshipKind::DEPENDS_ON);
+        assert_eq!(dr.relationship.kind, RelationshipKind::CALLS);
     }
 
     // -----------------------------------------------------------------------
@@ -1465,13 +1469,13 @@ mod tests {
         // All three rules ran and produced their respective discoveries
         assert_eq!(results.len(), 3);
 
-        // Result 0: RuntimeConnectionRule -> pod DEPENDS_ON db
+        // Result 0: RuntimeConnectionRule -> pod CALLS db
         let r0 = results[0]
             .discovered()
             .expect("result 0 should be Discovered");
         assert_eq!(r0.relationship.source, pod);
         assert_eq!(r0.relationship.target, db);
-        assert_eq!(r0.relationship.kind, RelationshipKind::DEPENDS_ON);
+        assert_eq!(r0.relationship.kind, RelationshipKind::CALLS);
 
         // Result 1: MockOwnershipRule -> team OWNS service
         let r1 = results[1]
@@ -1611,7 +1615,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(
             results[0].discovered().unwrap().relationship.kind,
-            RelationshipKind::DEPENDS_ON
+            RelationshipKind::CALLS
         );
         assert_eq!(
             results[1].discovered().unwrap().relationship.kind,
@@ -2125,7 +2129,7 @@ mod tests {
         let results = engine.run(&[conn, map, owner_ev, ref_ev]);
 
         // Expected:
-        // - RuntimeConnectionRule: pod -> db (DEPENDS_ON)
+        // - RuntimeConnectionRule: pod -> db (CALLS)
         // - OwnershipRule: dep -> pod (OWNS)
         // - ResourceReferenceRule: dep -> cm (DEPENDS_ON)
         assert_eq!(results.len(), 3);
@@ -2133,7 +2137,7 @@ mod tests {
         let rels: Vec<_> = results.iter().map(|r| r.discovered().unwrap()).collect();
         assert!(rels.iter().any(|d| d.relationship.source == pod
             && d.relationship.target == db
-            && d.relationship.kind == RelationshipKind::DEPENDS_ON));
+            && d.relationship.kind == RelationshipKind::CALLS));
         assert!(rels.iter().any(|d| d.relationship.source == dep
             && d.relationship.target == pod
             && d.relationship.kind == RelationshipKind::OWNS));
@@ -2425,5 +2429,99 @@ mod tests {
             results.is_empty(),
             "architectural invariant violated: relationships derived merely from label selector matching"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 40. Runtime connection discovers CALLS, enabling SCALE impact analysis
+    //     while declarative DEPENDS_ON is suppressed under SCALE.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_discovered_runtime_connection_calls_enables_scale_impact() {
+        use crate::graph::Graph;
+        use crate::impact::{ChangeType, ImpactEngine, ImpactRequest, ProposedChange};
+
+        let caller_pod = pod_identity("frontend-pod");
+        let target_svc = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            "backend-service",
+        );
+        let config_dep = ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("deployment"),
+            "backend-deployment",
+        );
+
+        // 1. Runtime connection evidence: caller_pod connects to 10.0.1.50:8080
+        let conn_ev = connection_evidence(caller_pod.clone(), "10.0.1.50", 8080);
+        // Mapping evidence: target_svc has endpoint 10.0.1.50:8080
+        let map_ev = mapping_evidence(target_svc.clone(), "10.0.1.50", 8080);
+
+        // 2. Declarative resource reference: config_dep references target_svc
+        let ref_ev = Evidence::new(
+            k8s_source(),
+            Utc::now(),
+            ObservationType::RESOURCE_REFERENCE,
+            config_dep.clone(),
+            json!({
+                "target": {
+                    "provider": "kubernetes",
+                    "resource_type": "service",
+                    "provider_id": "backend-service"
+                }
+            }),
+        );
+
+        let engine = DiscoveryEngine::default_v2();
+        let results = engine.run(&[conn_ev, map_ev, ref_ev]);
+
+        assert_eq!(results.len(), 2);
+        let rels: Vec<_> = results.iter().map(|r| r.discovered().unwrap()).collect();
+
+        // Verify relationship kinds and categories
+        let calls_rel = rels
+            .iter()
+            .find(|d| d.relationship.source == caller_pod && d.relationship.target == target_svc)
+            .expect("must discover caller_pod -> target_svc");
+        assert_eq!(calls_rel.relationship.kind, RelationshipKind::CALLS);
+        assert_eq!(
+            calls_rel.relationship.category,
+            crate::relationship::RelationshipCategory::Invocation
+        );
+
+        let depends_rel = rels
+            .iter()
+            .find(|d| d.relationship.source == config_dep && d.relationship.target == target_svc)
+            .expect("must discover config_dep -> target_svc");
+        assert_eq!(depends_rel.relationship.kind, RelationshipKind::DEPENDS_ON);
+        assert_eq!(
+            depends_rel.relationship.category,
+            crate::relationship::RelationshipCategory::Dependency
+        );
+
+        // Build Graph from discovered relationships
+        let mut graph = Graph::new();
+        for dr in &rels {
+            graph.add_relationship(dr.relationship.clone());
+        }
+
+        // 3. SCALE impact analysis on target_svc
+        let scale_req = ImpactRequest::incoming(target_svc.clone(), 5)
+            .with_proposed_change(ProposedChange::new(ChangeType::Scale));
+        let scale_result = ImpactEngine::analyze(&graph, &scale_req);
+
+        // Invariant: SCALE reaches caller_pod (CALLS) and SUPPRESSES config_dep (DEPENDS_ON)
+        assert_eq!(scale_result.len(), 1);
+        assert_eq!(scale_result.impacted[0].resource, caller_pod);
+        assert_eq!(scale_result.impacted[0].depth, 1);
+        assert!(!scale_result.contains(&config_dep));
+
+        // 4. Contrast with DELETE: reaches BOTH caller_pod and config_dep
+        let delete_req = ImpactRequest::incoming(target_svc.clone(), 5)
+            .with_proposed_change(ProposedChange::new(ChangeType::Delete));
+        let delete_result = ImpactEngine::analyze(&graph, &delete_req);
+        assert_eq!(delete_result.len(), 2);
+        assert!(delete_result.contains(&caller_pod));
+        assert!(delete_result.contains(&config_dep));
     }
 }
