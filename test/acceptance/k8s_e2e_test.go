@@ -641,7 +641,8 @@ func TestKubernetes_RealEndToEndFlow(t *testing.T) {
 		foundIngressDependsOnBackendSvc bool
 		backendPodIdentity              state.ResourceIdentity
 		frontendPodIdentity             state.ResourceIdentity
-		targetNodeIdentity              state.ResourceIdentity
+		nodePodsMap                     = make(map[string][]state.ResourceIdentity)
+		nodesMap                        = make(map[string]state.ResourceIdentity)
 		foundAnyCallsRelationship       bool
 	)
 
@@ -684,17 +685,17 @@ func TestKubernetes_RealEndToEndFlow(t *testing.T) {
 
 		// Check for Pod -> Node DEPENDS_ON relationship
 		if rel.Kind == "DEPENDS_ON" && rel.Source.ResourceType == "pod" && rel.Target.ResourceType == "node" {
+			nodePodsMap[rel.Target.ProviderID] = append(nodePodsMap[rel.Target.ProviderID], rel.Source)
+			nodesMap[rel.Target.ProviderID] = rel.Target
 			if strings.Contains(rel.Source.ProviderID, "/backend-") {
 				foundBackendPodDependsOnNode = true
 				backendPodIdentity = rel.Source
-				targetNodeIdentity = rel.Target
 				t.Logf("Verified dependency: %s DEPENDS_ON %s (supported by %d evidence records)",
 					rel.Source.ProviderID, rel.Target.ProviderID, len(evIDs))
 			}
 			if strings.Contains(rel.Source.ProviderID, "/frontend-") {
 				foundFrontendPodDependsOnNode = true
 				frontendPodIdentity = rel.Source
-				targetNodeIdentity = rel.Target
 				t.Logf("Verified dependency: %s DEPENDS_ON %s (supported by %d evidence records)",
 					rel.Source.ProviderID, rel.Target.ProviderID, len(evIDs))
 			}
@@ -776,8 +777,11 @@ func TestKubernetes_RealEndToEndFlow(t *testing.T) {
 	if !foundIngressDependsOnBackendSvc {
 		t.Fatalf("expected Ingress %s to depend on Service %s in discovered relationships", expectedBackendIngress, expectedBackendSvc)
 	}
-	if targetNodeIdentity.ProviderID == "" {
-		t.Fatalf("expected target node identity to be populated from discovered DEPENDS_ON relationships")
+	if len(nodesMap) == 0 {
+		t.Fatalf("expected at least one target node identity to be populated from discovered DEPENDS_ON relationships")
+	}
+	if frontendPodIdentity.ProviderID == "" {
+		t.Fatalf("expected frontend pod identity to be populated from discovered DEPENDS_ON relationships")
 	}
 
 	// Negative Test: Zero Secret Custody Check
@@ -811,76 +815,88 @@ func TestKubernetes_RealEndToEndFlow(t *testing.T) {
 	// 11. Run Real Impact Query ("What Breaks?") on the collected state
 	answerSvc := answer.NewService(coreClient, logger)
 
-	// A. Query impact on the real Kubernetes Node (Incoming traversal along DEPENDS_ON)
+	// A. Query impact on the real Kubernetes Node(s) (Incoming traversal along DEPENDS_ON)
 	// Because Pod DEPENDS_ON Node, incoming traversal from Node discovers upstream dependent Pods.
 	// Since DEPENDS_ON propagates impact, this produces a real, non-zero blast radius!
-	impactTargetNode := &answer.ResourceIdentity{
-		Provider:     targetNodeIdentity.Provider,
-		ResourceType: targetNodeIdentity.ResourceType,
-		ProviderID:   targetNodeIdentity.ProviderID,
-	}
-
-	ansNode, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
-		WorkspaceID: workspaceID,
-		Target:      impactTargetNode,
-		Direction:   "incoming",
-		MaxDepth:    5,
-	})
-	if err != nil {
-		t.Fatalf("AnalyzeImpact on Node failed: %v", err)
-	}
-	if ansNode.Target.ProviderID != targetNodeIdentity.ProviderID {
-		t.Errorf("expected target %s in ImpactAnswer, got %s", targetNodeIdentity.ProviderID, ansNode.Target.ProviderID)
-	}
-
-	t.Logf("Node Impact Answer: target=%s, impacted_count=%d, direct_count=%d, indirect_count=%d, max_depth=%d, paths=%d, evidence_refs=%d",
-		ansNode.Target.ProviderID, ansNode.Summary.ImpactedCount, ansNode.Summary.DirectCount,
-		ansNode.Summary.IndirectCount, ansNode.Summary.MaxDepth, len(ansNode.Paths), len(ansNode.Evidence))
-
-	// Verify non-zero blast radius on Node
-	if ansNode.Summary.ImpactedCount == 0 {
-		t.Fatalf("expected non-zero blast radius for Node with dependent Pods, got 0")
-	}
-	if ansNode.Summary.DirectCount < 2 {
-		t.Errorf("expected at least 2 directly impacted pods (backend and frontend), got %d", ansNode.Summary.DirectCount)
-	}
-
-	// Verify that the impacted resources are indeed the real Kubernetes Pods
-	impactedMap := make(map[string]answer.ImpactedResource)
-	for _, ir := range ansNode.ImpactedResources {
-		impactedMap[ir.Resource.ProviderID] = ir
-		t.Logf("  Impacted Resource: %s (depth=%d)", ir.Resource.ProviderID, ir.Depth)
-	}
-
-	if ir, ok := impactedMap[backendPodIdentity.ProviderID]; !ok {
-		t.Errorf("expected backend pod %s in impacted resources", backendPodIdentity.ProviderID)
-	} else if ir.Depth != 1 {
-		t.Errorf("expected backend pod depth=1, got %d", ir.Depth)
-	}
-
-	if ir, ok := impactedMap[frontendPodIdentity.ProviderID]; !ok {
-		t.Errorf("expected frontend pod %s in impacted resources", frontendPodIdentity.ProviderID)
-	} else if ir.Depth != 1 {
-		t.Errorf("expected frontend pod depth=1, got %d", ir.Depth)
-	}
-
-	// Verify Paths: Pod -> DEPENDS_ON -> Node
-	if len(ansNode.Paths) < 2 {
-		t.Errorf("expected at least 2 paths in answer, got %d", len(ansNode.Paths))
-	}
-
-	// Verify Evidence in Answer: must match persisted PostgreSQL evidence records
-	if len(ansNode.Evidence) == 0 {
-		t.Errorf("expected supporting evidence in answer, got 0")
-	}
-	for _, ev := range ansNode.Evidence {
-		t.Logf("  Answer Evidence: id=%s, type=%s, source=%s/%s",
-			ev.ID, ev.ObservationType, ev.Source.Provider, ev.Source.Collector)
-		if _, exists := persistedEvidenceMap[ev.ID]; !exists {
-			t.Errorf("answer evidence %s does not exist in persisted PostgreSQL evidence", ev.ID)
+	for nodeID, scheduledPods := range nodePodsMap {
+		nodeIdent := nodesMap[nodeID]
+		impactTargetNode := &answer.ResourceIdentity{
+			Provider:     nodeIdent.Provider,
+			ResourceType: nodeIdent.ResourceType,
+			ProviderID:   nodeIdent.ProviderID,
 		}
-		if ev.Source.Provider != "kubernetes" || ev.Source.Collector != "k8s-collector" {
-			t.Errorf("unexpected evidence source: %+v", ev.Source)
+
+		ansNode, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
+			WorkspaceID: workspaceID,
+			Target:      impactTargetNode,
+			Direction:   "incoming",
+			MaxDepth:    5,
+		})
+		if err != nil {
+			t.Fatalf("AnalyzeImpact on Node %s failed: %v", nodeID, err)
+		}
+		if ansNode.Target.ProviderID != nodeIdent.ProviderID {
+			t.Errorf("expected target %s in ImpactAnswer, got %s", nodeIdent.ProviderID, ansNode.Target.ProviderID)
+		}
+
+		t.Logf("Node Impact Answer: target=%s, impacted_count=%d, direct_count=%d, indirect_count=%d, max_depth=%d, paths=%d, evidence_refs=%d",
+			ansNode.Target.ProviderID, ansNode.Summary.ImpactedCount, ansNode.Summary.DirectCount,
+			ansNode.Summary.IndirectCount, ansNode.Summary.MaxDepth, len(ansNode.Paths), len(ansNode.Evidence))
+
+		// Verify non-zero blast radius on Node
+		if ansNode.Summary.ImpactedCount == 0 {
+			t.Fatalf("expected non-zero blast radius for Node %s with dependent Pods, got 0", nodeID)
+		}
+		if int(ansNode.Summary.DirectCount) < len(scheduledPods) {
+			t.Errorf("expected at least %d directly impacted pods for Node %s, got %d", len(scheduledPods), nodeID, ansNode.Summary.DirectCount)
+		}
+
+		// Verify that the impacted resources are indeed the real Kubernetes Pods scheduled on this Node
+		impactedMap := make(map[string]answer.ImpactedResource)
+		for _, ir := range ansNode.ImpactedResources {
+			impactedMap[ir.Resource.ProviderID] = ir
+			t.Logf("  Impacted Resource: %s (depth=%d)", ir.Resource.ProviderID, ir.Depth)
+		}
+
+		for _, pod := range scheduledPods {
+			if ir, ok := impactedMap[pod.ProviderID]; !ok {
+				t.Errorf("expected scheduled pod %s in impacted resources for Node %s", pod.ProviderID, nodeID)
+			} else if ir.Depth != 1 {
+				t.Errorf("expected pod %s depth=1, got %d", pod.ProviderID, ir.Depth)
+			}
+		}
+
+		// Verify that pods scheduled on other nodes are NOT falsely impacted by failure of this node
+		for otherNodeID, otherPods := range nodePodsMap {
+			if otherNodeID == nodeID {
+				continue
+			}
+			for _, otherPod := range otherPods {
+				if _, falselyImpacted := impactedMap[otherPod.ProviderID]; falselyImpacted {
+					t.Errorf("isolation violation: pod %s on node %s falsely reported as impacted by failure of node %s",
+						otherPod.ProviderID, otherNodeID, nodeID)
+				}
+			}
+		}
+
+		// Verify Paths: Pod -> DEPENDS_ON -> Node
+		if len(ansNode.Paths) < len(scheduledPods) {
+			t.Errorf("expected at least %d paths in answer for Node %s, got %d", len(scheduledPods), nodeID, len(ansNode.Paths))
+		}
+
+		// Verify Evidence in Answer: must match persisted PostgreSQL evidence records
+		if len(ansNode.Evidence) == 0 {
+			t.Errorf("expected supporting evidence in answer for Node %s, got 0", nodeID)
+		}
+		for _, ev := range ansNode.Evidence {
+			t.Logf("  Answer Evidence: id=%s, type=%s, source=%s/%s",
+				ev.ID, ev.ObservationType, ev.Source.Provider, ev.Source.Collector)
+			if _, exists := persistedEvidenceMap[ev.ID]; !exists {
+				t.Errorf("answer evidence %s does not exist in persisted PostgreSQL evidence", ev.ID)
+			}
+			if ev.Source.Provider != "kubernetes" || ev.Source.Collector != "k8s-collector" {
+				t.Errorf("unexpected evidence source: %+v", ev.Source)
+			}
 		}
 	}
 
@@ -1135,38 +1151,46 @@ func TestKubernetes_RealEndToEndFlow(t *testing.T) {
 
 	// 3. Proposed DELETE on Node:
 	// Node has incoming DEPENDS_ON from observed Pods.
-	ansNodeDelete, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
-		WorkspaceID: workspaceID,
-		Target:      impactTargetNode,
-		Direction:   "incoming",
-		MaxDepth:    5,
-		ProposedChange: &answer.ProposedChange{
-			ChangeType: answer.ChangeTypeDelete,
-			Details:    "draining and deleting node from cluster",
-		},
-	})
-	if err != nil {
-		t.Fatalf("AnalyzeImpact DELETE on Node failed: %v", err)
-	}
-	if ansNodeDelete.ChangeAssessment == nil {
-		t.Fatalf("expected ChangeAssessment for Node DELETE, got nil")
-	}
-	if ansNodeDelete.ChangeAssessment.ChangeType != answer.ChangeTypeDelete {
-		t.Errorf("expected ChangeType DELETE, got %s", ansNodeDelete.ChangeAssessment.ChangeType)
-	}
-	if ansNodeDelete.Summary.ImpactedCount == 0 {
-		t.Fatalf("expected non-zero impact for Node DELETE, got 0")
-	}
-	for _, ir := range ansNodeDelete.ImpactedResources {
-		if ir.Depth == 1 && ir.ImpactType != "DIRECT" {
-			t.Errorf("expected DIRECT for depth 1, got %s", ir.ImpactType)
+	for nodeID, scheduledPods := range nodePodsMap {
+		nodeIdent := nodesMap[nodeID]
+		impactTargetNode := &answer.ResourceIdentity{
+			Provider:     nodeIdent.Provider,
+			ResourceType: nodeIdent.ResourceType,
+			ProviderID:   nodeIdent.ProviderID,
 		}
-		if ir.ImpactReason == "" {
-			t.Errorf("expected non-empty impact_reason for %s", ir.Resource.ProviderID)
+		ansNodeDelete, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
+			WorkspaceID: workspaceID,
+			Target:      impactTargetNode,
+			Direction:   "incoming",
+			MaxDepth:    5,
+			ProposedChange: &answer.ProposedChange{
+				ChangeType: answer.ChangeTypeDelete,
+				Details:    "draining and deleting node from cluster",
+			},
+		})
+		if err != nil {
+			t.Fatalf("AnalyzeImpact DELETE on Node %s failed: %v", nodeID, err)
 		}
+		if ansNodeDelete.ChangeAssessment == nil {
+			t.Fatalf("expected ChangeAssessment for Node %s DELETE, got nil", nodeID)
+		}
+		if ansNodeDelete.ChangeAssessment.ChangeType != answer.ChangeTypeDelete {
+			t.Errorf("expected ChangeType DELETE, got %s", ansNodeDelete.ChangeAssessment.ChangeType)
+		}
+		if int(ansNodeDelete.Summary.ImpactedCount) < len(scheduledPods) {
+			t.Fatalf("expected at least %d impacted for Node %s DELETE, got %d", len(scheduledPods), nodeID, ansNodeDelete.Summary.ImpactedCount)
+		}
+		for _, ir := range ansNodeDelete.ImpactedResources {
+			if ir.Depth == 1 && ir.ImpactType != "DIRECT" {
+				t.Errorf("expected DIRECT for depth 1, got %s", ir.ImpactType)
+			}
+			if ir.ImpactReason == "" {
+				t.Errorf("expected non-empty impact_reason for %s", ir.Resource.ProviderID)
+			}
+		}
+		t.Logf("Node DELETE Impact: target=%s, impacted_count=%d, impact_nature=%s",
+			ansNodeDelete.Target.ProviderID, ansNodeDelete.Summary.ImpactedCount, ansNodeDelete.ChangeAssessment.ImpactNature)
 	}
-	t.Logf("Node DELETE Impact: target=%s, impacted_count=%d, impact_nature=%s",
-		ansNodeDelete.Target.ProviderID, ansNodeDelete.Summary.ImpactedCount, ansNodeDelete.ChangeAssessment.ImpactNature)
 
 	t.Logf("Real Kubernetes End-to-End flow verified successfully with DEPENDS_ON non-zero blast radius, control-plane ownership, and ZERO fake data.")
 }
