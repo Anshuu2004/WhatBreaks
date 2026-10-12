@@ -17,9 +17,11 @@ type mockService struct {
 	lastReq answer.ImpactRequest
 	ans     *answer.ImpactAnswer
 	err     error
+	calls   int
 }
 
 func (m *mockService) AnalyzeImpact(ctx context.Context, req answer.ImpactRequest) (*answer.ImpactAnswer, error) {
+	m.calls++
 	m.lastReq = req
 	if m.err != nil {
 		return nil, m.err
@@ -819,3 +821,314 @@ func TestHandler_EmptyChangeTypeWithDetails_Returns400(t *testing.T) {
 		t.Fatalf("expected 400 Bad Request, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Regression Tests: Workspace Authorization Security Invariants
+// ---------------------------------------------------------------------------
+
+func makeWorkspacePayload(wsID string) []byte {
+	return []byte(`{
+		"workspace_id": "` + wsID + `",
+		"target": {
+			"provider": "kubernetes",
+			"resource_type": "pod",
+			"provider_id": "payments/payments-api"
+		},
+		"direction": "incoming",
+		"max_depth": 3
+	}`)
+}
+
+// 1. Missing transport workspace ID with a workspace ID in the body (unauthorized & unauthenticated)
+func TestHandler_Auth_MissingTransport_BodyWorkspaceID_Unauthorized(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	svc := &mockService{
+		ans: &answer.ImpactAnswer{
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+		},
+	}
+	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+
+	// Authenticated as user-1 (only member of tenant 11111111...), but body specifies victim tenant 22222222...
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("22222222-2222-2222-2222-222222222222"))).WithContext(ctx)
+	// Notice: NO X-Workspace-ID header set!
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for unauthorized body workspace, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.calls != 0 {
+		t.Fatalf("SECURITY VIOLATION: core engine was called %d times on unauthorized request", svc.calls)
+	}
+}
+
+func TestHandler_Auth_MissingTransport_BodyWorkspaceID_Unauthenticated(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	svc := &mockService{
+		ans: &answer.ImpactAnswer{
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+		},
+	}
+	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+
+	// No user in context (unauthenticated), body specifies victim tenant 22222222...
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("22222222-2222-2222-2222-222222222222")))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for unauthenticated body workspace, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.calls != 0 {
+		t.Fatalf("SECURITY VIOLATION: core engine was called %d times on unauthenticated request", svc.calls)
+	}
+}
+
+// 2. Authorized tenant-A header with tenant-B body (mismatch must return 400 Bad Request)
+func TestHandler_Auth_HeaderTenantA_BodyTenantB_MismatchRejected(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	svc := &mockService{
+		ans: &answer.ImpactAnswer{
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+		},
+	}
+	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("22222222-2222-2222-2222-222222222222"))).WithContext(ctx)
+	req.Header.Set("X-Workspace-ID", "11111111-1111-1111-1111-111111111111")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for mismatched transport and body workspace, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.calls != 0 {
+		t.Fatalf("SECURITY VIOLATION: core engine was called %d times on mismatched request", svc.calls)
+	}
+}
+
+// 3. Authorized matching header and body (must succeed with 200 OK and analyze authorized workspace)
+func TestHandler_Auth_MatchingHeaderAndBody_Authorized(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	svc := &mockService{
+		ans: &answer.ImpactAnswer{
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+		},
+	}
+	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("11111111-1111-1111-1111-111111111111"))).WithContext(ctx)
+	req.Header.Set("X-Workspace-ID", "11111111-1111-1111-1111-111111111111")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for matching authorized workspace, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.calls != 1 {
+		t.Fatalf("expected 1 call to core engine, got %d", svc.calls)
+	}
+	if svc.lastReq.WorkspaceID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("expected workspace_id 11111111-1111-1111-1111-111111111111, got %q", svc.lastReq.WorkspaceID)
+	}
+}
+
+// 4. Unauthorized workspace (must return 403 Forbidden, engine never called)
+func TestHandler_Auth_UnauthorizedWorkspace_EngineNeverCalled(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	svc := &mockService{
+		ans: &answer.ImpactAnswer{
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+		},
+	}
+	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload())).WithContext(ctx)
+	req.Header.Set("X-Workspace-ID", "22222222-2222-2222-2222-222222222222")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	if svc.calls != 0 {
+		t.Fatalf("SECURITY VIOLATION: core engine was called %d times on unauthorized request", svc.calls)
+	}
+}
+
+// 5. Empty workspace ID when authorization is configured
+func TestHandler_Auth_EmptyWorkspaceID(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	svc := &mockService{
+		ans: &answer.ImpactAnswer{
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+		},
+	}
+	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+
+	// Subcase a: unauthenticated, empty transport, empty body
+	reqUnauth := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload()))
+	rrUnauth := httptest.NewRecorder()
+	h.ServeHTTP(rrUnauth, reqUnauth)
+
+	if rrUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for empty workspace and unauthenticated caller, got %d (body: %s)", rrUnauth.Code, rrUnauth.Body.String())
+	}
+	if svc.calls != 0 {
+		t.Fatalf("SECURITY VIOLATION: core engine called on unauthenticated empty workspace request")
+	}
+
+	// Subcase b: authenticated user, but empty transport, empty body
+	ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+	reqAuth := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload())).WithContext(ctx)
+	rrAuth := httptest.NewRecorder()
+	h.ServeHTTP(rrAuth, reqAuth)
+
+	if rrAuth.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for empty workspace with authenticated user, got %d (body: %s)", rrAuth.Code, rrAuth.Body.String())
+	}
+	if svc.calls != 0 {
+		t.Fatalf("SECURITY VIOLATION: core engine called on empty workspace request")
+	}
+}
+
+// 6. Existing legitimate API requests under different authorization models
+func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
+	mem := auth.NewMemoryMembershipProvider()
+	mem.AddMember("user-1", "11111111-1111-1111-1111-111111111111", "member")
+	authorizer := auth.NewWorkspaceAuthorizer(mem)
+
+	// Subcase a: Authorized user, header only
+	{
+		svc := &mockService{
+			ans: &answer.ImpactAnswer{
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			},
+		}
+		h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+		ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload())).WithContext(ctx)
+		req.Header.Set("X-Workspace-ID", "11111111-1111-1111-1111-111111111111")
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for header-only authorized request, got %d (body: %s)", rr.Code, rr.Body.String())
+		}
+		if svc.calls != 1 || svc.lastReq.WorkspaceID != "11111111-1111-1111-1111-111111111111" {
+			t.Fatalf("expected 1 call with workspace 11111111..., got calls=%d, ws=%s", svc.calls, svc.lastReq.WorkspaceID)
+		}
+	}
+
+	// Subcase b: Authorized user, body only
+	{
+		svc := &mockService{
+			ans: &answer.ImpactAnswer{
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			},
+		}
+		h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
+		ctx := auth.WithUser(context.Background(), &auth.User{ID: "user-1", Email: "user@example.com"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("11111111-1111-1111-1111-111111111111"))).WithContext(ctx)
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for body-only authorized request, got %d (body: %s)", rr.Code, rr.Body.String())
+		}
+		if svc.calls != 1 || svc.lastReq.WorkspaceID != "11111111-1111-1111-1111-111111111111" {
+			t.Fatalf("expected 1 call with workspace 11111111..., got calls=%d, ws=%s", svc.calls, svc.lastReq.WorkspaceID)
+		}
+	}
+
+	// Subcase c: No authorizer configured, matching header and body
+	{
+		svc := &mockService{
+			ans: &answer.ImpactAnswer{
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			},
+		}
+		h := answer.NewHandler(svc) // no authorizer
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("ws-dev")))
+		req.Header.Set("X-Workspace-ID", "ws-dev")
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK without authorizer, got %d (body: %s)", rr.Code, rr.Body.String())
+		}
+		if svc.calls != 1 || svc.lastReq.WorkspaceID != "ws-dev" {
+			t.Fatalf("expected 1 call with ws-dev, got calls=%d, ws=%s", svc.calls, svc.lastReq.WorkspaceID)
+		}
+	}
+
+	// Subcase d: No authorizer configured, header and body mismatch -> rejected with 400
+	{
+		svc := &mockService{
+			ans: &answer.ImpactAnswer{
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			},
+		}
+		h := answer.NewHandler(svc) // no authorizer
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(makeWorkspacePayload("ws-body")))
+		req.Header.Set("X-Workspace-ID", "ws-header")
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request on mismatch without authorizer, got %d (body: %s)", rr.Code, rr.Body.String())
+		}
+		if svc.calls != 0 {
+			t.Fatalf("expected 0 calls to engine on mismatch, got %d", svc.calls)
+		}
+	}
+
+	// Subcase e: No authorizer configured, default payload without workspace ID -> 200 OK
+	{
+		svc := &mockService{
+			ans: &answer.ImpactAnswer{
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			},
+		}
+		h := answer.NewHandler(svc) // no authorizer
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload()))
+		rr := httptest.NewRecorder()
+
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for default request without authorizer, got %d (body: %s)", rr.Code, rr.Body.String())
+		}
+		if svc.calls != 1 {
+			t.Fatalf("expected 1 call to engine, got %d", svc.calls)
+		}
+	}
+}
+

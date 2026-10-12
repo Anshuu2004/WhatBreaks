@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/auth"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/logging"
@@ -59,27 +60,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Enforce Workspace Authorization if authorizer configured
-	if h.authorizer != nil {
-		wsID := h.getWSID(r)
-		if wsID != "" {
-			if err := h.authorizer.AuthorizeWorkspaceAccess(r.Context(), wsID); err != nil {
-				switch {
-				case errors.Is(err, auth.ErrNotAuthenticated):
-					writeErrorResponse(w, http.StatusUnauthorized, "Not authenticated", string(CodeUnauthorized))
-				case errors.Is(err, auth.ErrWorkspaceNotFound):
-					writeErrorResponse(w, http.StatusNotFound, "Workspace not found", string(CodeNotFound))
-				case errors.Is(err, auth.ErrInvalidWorkspaceID):
-					writeErrorResponse(w, http.StatusBadRequest, "Invalid workspace ID", string(CodeBadRequest))
-				default:
-					writeErrorResponse(w, http.StatusForbidden, "Access to workspace forbidden", string(CodeForbidden))
-				}
-				return
-			}
-		}
-	}
-
-	// 2. Decode incoming JSON payload
+	// 1. Decode incoming JSON payload
 	var req ImpactRequest
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&req); err != nil {
@@ -87,12 +68,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wsID := h.getWSID(r)
-	if wsID != "" && req.WorkspaceID == "" {
-		req.WorkspaceID = wsID
+	// 2. Resolve transport and body workspace identifiers
+	var transportWS string
+	if h.getWSID != nil {
+		transportWS = strings.TrimSpace(h.getWSID(r))
+	}
+	bodyWS := strings.TrimSpace(req.WorkspaceID)
+
+	// 3. Reject mismatches if both transport and body specify workspace ID
+	if transportWS != "" && bodyWS != "" && transportWS != bodyWS {
+		writeErrorResponse(w, http.StatusBadRequest, "Workspace ID mismatch between transport and request body", string(CodeBadRequest))
+		return
 	}
 
-	// 3. Validate request schema and boundaries
+	// 4. Determine effective workspace identity
+	effectiveWS := transportWS
+	if effectiveWS == "" {
+		effectiveWS = bodyWS
+	}
+
+	// 5. Enforce Workspace Authorization if authorizer configured
+	if h.authorizer != nil {
+		if err := h.authorizer.AuthorizeWorkspaceAccess(r.Context(), effectiveWS); err != nil {
+			switch {
+			case errors.Is(err, auth.ErrNotAuthenticated):
+				writeErrorResponse(w, http.StatusUnauthorized, "Not authenticated", string(CodeUnauthorized))
+			case errors.Is(err, auth.ErrWorkspaceNotFound):
+				writeErrorResponse(w, http.StatusNotFound, "Workspace not found", string(CodeNotFound))
+			case errors.Is(err, auth.ErrInvalidWorkspaceID):
+				writeErrorResponse(w, http.StatusBadRequest, "Invalid workspace ID", string(CodeBadRequest))
+			default:
+				writeErrorResponse(w, http.StatusForbidden, "Access to workspace forbidden", string(CodeForbidden))
+			}
+			return
+		}
+	}
+
+	// 6. Ensure request carries the authorized/effective workspace ID
+	req.WorkspaceID = effectiveWS
+
+	// 7. Validate request schema and boundaries
 	if err := ValidateImpactRequest(&req); err != nil {
 		writeErrorResponse(w, http.StatusBadRequest, err.Error(), string(CodeValidationError))
 		return
