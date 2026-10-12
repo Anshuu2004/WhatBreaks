@@ -288,17 +288,27 @@ impl DiscoveryRule for RuntimeConnectionRule {
             return vec![];
         }
 
-        // Build a mapping: Endpoint → Vec<(ResourceIdentity, EvidenceId)>
-        // Multiple entries for the same endpoint indicate a conflict.
-        let mut endpoint_to_targets: HashMap<Endpoint, Vec<(ResourceIdentity, EvidenceId)>> =
+        // Build a mapping: Endpoint → Vec<(ResourceIdentity, Vec<EvidenceId>)>
+        // Targets are deduplicated by ResourceIdentity. Multiple mapping evidence
+        // records for the same ResourceIdentity represent corroborating observations
+        // and have their evidence IDs accumulated.
+        // A conflict occurs only if multiple distinct ResourceIdentity values claim the same endpoint.
+        let mut endpoint_to_targets: HashMap<Endpoint, Vec<(ResourceIdentity, Vec<EvidenceId>)>> =
             HashMap::new();
 
         for mapping_ev in &mappings {
             if let Some(ep) = Endpoint::from_mapping(mapping_ev) {
-                endpoint_to_targets
-                    .entry(ep)
-                    .or_default()
-                    .push((mapping_ev.subject.clone(), mapping_ev.id));
+                let targets = endpoint_to_targets.entry(ep).or_default();
+                if let Some((_, evidence_ids)) = targets
+                    .iter_mut()
+                    .find(|(ri, _)| ri == &mapping_ev.subject)
+                {
+                    if !evidence_ids.contains(&mapping_ev.id) {
+                        evidence_ids.push(mapping_ev.id);
+                    }
+                } else {
+                    targets.push((mapping_ev.subject.clone(), vec![mapping_ev.id]));
+                }
             }
         }
 
@@ -324,9 +334,10 @@ impl DiscoveryRule for RuntimeConnectionRule {
                 }
 
                 Some(targets) if targets.len() > 1 => {
-                    // Multiple resources claim the same endpoint → conflict.
-                    let resource_strs: Vec<String> =
+                    // Multiple distinct resources claim the same endpoint → conflict.
+                    let mut resource_strs: Vec<String> =
                         targets.iter().map(|(ri, _)| ri.to_string()).collect();
+                    resource_strs.sort();
                     results.push(DiscoveryResult::Conflict {
                         description: format!(
                             "Endpoint {}:{} maps to multiple resources: {}",
@@ -338,8 +349,8 @@ impl DiscoveryRule for RuntimeConnectionRule {
                 }
 
                 Some(targets) => {
-                    // Exactly one target → derive the relationship.
-                    let (target_identity, mapping_evidence_id) = &targets[0];
+                    // Exactly one distinct target identity → derive the relationship.
+                    let (target_identity, mapping_evidence_ids) = &targets[0];
 
                     let relationship = Relationship::new(
                         conn_ev.subject.clone(),
@@ -347,9 +358,16 @@ impl DiscoveryRule for RuntimeConnectionRule {
                         RelationshipKind::CALLS,
                     );
 
+                    let mut supporting_evidence = vec![conn_ev.id];
+                    for &map_id in mapping_evidence_ids {
+                        if !supporting_evidence.contains(&map_id) {
+                            supporting_evidence.push(map_id);
+                        }
+                    }
+
                     results.push(DiscoveryResult::Discovered(DiscoveredRelationship::new(
                         relationship,
-                        vec![conn_ev.id, *mapping_evidence_id],
+                        supporting_evidence,
                     )));
                 }
             }
@@ -3068,6 +3086,116 @@ mod tests {
                 );
                 assert_eq!(dr.relationship.kind, RelationshipKind::ROUTES_TO);
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression Tests: RuntimeConnectionRule Duplicate Mapping Resolution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_duplicate_mappings_to_same_resource_corroborate_not_conflict() {
+        let pod = pod_identity("payments-api");
+        let db = db_identity("payments-db");
+
+        let conn = connection_evidence(pod.clone(), "10.0.2.15", 5432);
+        // Duplicate mappings pointing to the exact same target ResourceIdentity
+        let map1 = mapping_evidence(db.clone(), "10.0.2.15", 5432);
+        let map2 = mapping_evidence(db.clone(), "10.0.2.15", 5432);
+
+        let map1_id = map1.id;
+        let map2_id = map2.id;
+        let conn_id = conn.id;
+
+        let rule = RuntimeConnectionRule;
+        let results = rule.apply(&[conn, map1, map2]);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_discovered());
+
+        let dr = results[0].discovered().unwrap();
+        assert_eq!(dr.relationship.source, pod);
+        assert_eq!(dr.relationship.target, db);
+        assert_eq!(dr.relationship.kind, RelationshipKind::CALLS);
+
+        // All evidence IDs must be preserved
+        assert_eq!(dr.supporting_evidence.len(), 3);
+        assert!(dr.supporting_evidence.contains(&conn_id));
+        assert!(dr.supporting_evidence.contains(&map1_id));
+        assert!(dr.supporting_evidence.contains(&map2_id));
+    }
+
+    #[test]
+    fn test_multiple_distinct_resources_same_endpoint_produces_conflict() {
+        let pod = pod_identity("payments-api");
+        let db1 = db_identity("database-primary");
+        let db2 = db_identity("database-replica");
+
+        let conn = connection_evidence(pod.clone(), "10.0.2.15", 5432);
+        let map1 = mapping_evidence(db1.clone(), "10.0.2.15", 5432);
+        let map2 = mapping_evidence(db2.clone(), "10.0.2.15", 5432);
+
+        let rule = RuntimeConnectionRule;
+        let results = rule.apply(&[conn, map1, map2]);
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_conflict());
+
+        if let DiscoveryResult::Conflict { description } = &results[0] {
+            assert!(description.contains("10.0.2.15:5432"));
+            assert!(description.contains(&db1.to_string()));
+            assert!(description.contains(&db2.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_multiple_evidence_ids_preserved_on_calls_relationship() {
+        let pod = pod_identity("checkout-service");
+        let db = db_identity("order-db");
+
+        let conn = connection_evidence(pod.clone(), "10.0.3.20", 3306);
+        let map_a = mapping_evidence(db.clone(), "10.0.3.20", 3306);
+        let map_b = mapping_evidence(db.clone(), "10.0.3.20", 3306);
+        let map_c = mapping_evidence(db.clone(), "10.0.3.20", 3306);
+
+        let ids = [conn.id, map_a.id, map_b.id, map_c.id];
+
+        let rule = RuntimeConnectionRule;
+        let results = rule.apply(&[conn, map_a, map_b, map_c]);
+
+        assert_eq!(results.len(), 1);
+        let dr = results[0].discovered().unwrap();
+        assert_eq!(dr.relationship.source, pod);
+        assert_eq!(dr.relationship.target, db);
+        assert_eq!(dr.relationship.kind, RelationshipKind::CALLS);
+
+        assert_eq!(dr.supporting_evidence.len(), 4);
+        for id in &ids {
+            assert!(dr.supporting_evidence.contains(id));
+        }
+    }
+
+    #[test]
+    fn test_no_calls_relationship_from_ambiguous_endpoint_ownership() {
+        let pod1 = pod_identity("client-1");
+        let pod2 = pod_identity("client-2");
+        let svc_a = db_identity("service-a");
+        let svc_b = db_identity("service-b");
+
+        let conn1 = connection_evidence(pod1.clone(), "10.0.4.50", 8080);
+        let conn2 = connection_evidence(pod2.clone(), "10.0.4.50", 8080);
+        // Ambiguous endpoint: two distinct targets claim 10.0.4.50:8080
+        let map_a1 = mapping_evidence(svc_a.clone(), "10.0.4.50", 8080);
+        let map_a2 = mapping_evidence(svc_a.clone(), "10.0.4.50", 8080); // duplicate for A
+        let map_b = mapping_evidence(svc_b.clone(), "10.0.4.50", 8080);
+
+        let rule = RuntimeConnectionRule;
+        let results = rule.apply(&[conn1, conn2, map_a1, map_a2, map_b]);
+
+        assert_eq!(results.len(), 2);
+        for res in &results {
+            assert!(res.is_conflict(), "Ambiguous endpoint must produce Conflict");
+            assert!(res.discovered().is_none(), "Ambiguous endpoint must NEVER derive CALLS");
         }
     }
 }
