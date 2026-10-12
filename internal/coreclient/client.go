@@ -9,11 +9,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -22,9 +24,30 @@ const DefaultAddress = "127.0.0.1:50051"
 
 // Client wraps the generated DiscoveryServiceClient and AnswerServiceClient and their underlying gRPC connection.
 type Client struct {
-	conn         *grpc.ClientConn
-	client       corev1.DiscoveryServiceClient
-	answerClient corev1.AnswerServiceClient
+	conn           *grpc.ClientConn
+	client         corev1.DiscoveryServiceClient
+	answerClient   corev1.AnswerServiceClient
+	lastInstanceID *atomic.Pointer[string]
+}
+
+func instanceInterceptor(lastInstanceID *atomic.Pointer[string]) grpc.UnaryClientInterceptor {
+	return func(
+		ctx context.Context,
+		method string,
+		req, reply interface{},
+		cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker,
+		opts ...grpc.CallOption,
+	) error {
+		var header metadata.MD
+		opts = append(opts, grpc.Header(&header))
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if vals := header.Get("x-server-instance-id"); len(vals) > 0 && vals[0] != "" {
+			id := vals[0]
+			lastInstanceID.Store(&id)
+		}
+		return err
+	}
 }
 
 // Connect establishes a gRPC connection to the WhatBreaks Core Engine server.
@@ -36,8 +59,10 @@ func Connect(ctx context.Context, target string, opts ...grpc.DialOption) (*Clie
 		target = DefaultAddress
 	}
 
+	var lastInstanceID atomic.Pointer[string]
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(instanceInterceptor(&lastInstanceID)),
 	}
 	dialOpts = append(dialOpts, opts...)
 
@@ -47,18 +72,21 @@ func Connect(ctx context.Context, target string, opts ...grpc.DialOption) (*Clie
 	}
 
 	return &Client{
-		conn:         conn,
-		client:       corev1.NewDiscoveryServiceClient(conn),
-		answerClient: corev1.NewAnswerServiceClient(conn),
+		conn:           conn,
+		client:         corev1.NewDiscoveryServiceClient(conn),
+		answerClient:   corev1.NewAnswerServiceClient(conn),
+		lastInstanceID: &lastInstanceID,
 	}, nil
 }
 
 // NewFromConn constructs a Client using an existing *grpc.ClientConn.
 func NewFromConn(conn *grpc.ClientConn) *Client {
+	var lastInstanceID atomic.Pointer[string]
 	return &Client{
-		conn:         conn,
-		client:       corev1.NewDiscoveryServiceClient(conn),
-		answerClient: corev1.NewAnswerServiceClient(conn),
+		conn:           conn,
+		client:         corev1.NewDiscoveryServiceClient(conn),
+		answerClient:   corev1.NewAnswerServiceClient(conn),
+		lastInstanceID: &lastInstanceID,
 	}
 }
 
@@ -119,6 +147,39 @@ func (c *Client) LoadState(ctx context.Context, req *corev1.LoadStateRequest, op
 // AnswerServiceClient returns the raw generated AnswerServiceClient interface.
 func (c *Client) AnswerServiceClient() corev1.AnswerServiceClient {
 	return c.answerClient
+}
+
+// ServerInstanceID returns the most recent server instance ID observed from gRPC response metadata.
+func (c *Client) ServerInstanceID() string {
+	if c == nil || c.lastInstanceID == nil {
+		return ""
+	}
+	p := c.lastInstanceID.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// CheckLiveness performs a lightweight probe to the Rust Core Engine and returns the current server instance ID.
+func (c *Client) CheckLiveness(ctx context.Context) (string, error) {
+	if c == nil || c.client == nil {
+		return "", status.Error(codes.FailedPrecondition, "client is not connected")
+	}
+	var header metadata.MD
+	_, err := c.client.RunDiscovery(ctx, &corev1.RunDiscoveryRequest{}, grpc.Header(&header))
+	if err != nil {
+		return "", err
+	}
+	vals := header.Get("x-server-instance-id")
+	if len(vals) > 0 && vals[0] != "" {
+		if c.lastInstanceID != nil {
+			id := vals[0]
+			c.lastInstanceID.Store(&id)
+		}
+		return vals[0], nil
+	}
+	return c.ServerInstanceID(), nil
 }
 
 // Close closes the underlying gRPC connection.

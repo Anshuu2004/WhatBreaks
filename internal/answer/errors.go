@@ -9,6 +9,9 @@ var (
 	// ErrCoreUnavailable is returned when the Rust core engine is unreachable or not connected.
 	ErrCoreUnavailable = errors.New("core engine is currently unavailable")
 
+	// ErrWorkspaceNotMaterialized is returned when the target workspace has not been materialized in the core engine.
+	ErrWorkspaceNotMaterialized = errors.New("workspace state is not materialized")
+
 	// ErrCoreTimeout is returned when the Rust core engine call exceeds the deadline.
 	ErrCoreTimeout = errors.New("core engine request timed out")
 
@@ -40,13 +43,14 @@ type ErrorResponse struct {
 
 // Standard ErrorCode values matching platform conventions.
 const (
-	CodeBadRequest      = "BAD_REQUEST"
-	CodeValidationError = "VALIDATION_ERROR"
-	CodeUnauthorized    = "UNAUTHORIZED"
-	CodeForbidden       = "FORBIDDEN"
-	CodeNotFound        = "NOT_FOUND"
-	CodeCoreUnavailable = "CORE_UNAVAILABLE"
-	CodeCoreTimeout     = "CORE_TIMEOUT"
-	CodeRequestCanceled = "REQUEST_CANCELED"
-	CodeInternalError   = "INTERNAL_ERROR"
+	CodeBadRequest               = "BAD_REQUEST"
+	CodeValidationError          = "VALIDATION_ERROR"
+	CodeUnauthorized             = "UNAUTHORIZED"
+	CodeForbidden                = "FORBIDDEN"
+	CodeNotFound                 = "NOT_FOUND"
+	CodeCoreUnavailable          = "CORE_UNAVAILABLE"
+	CodeWorkspaceNotMaterialized = "WORKSPACE_NOT_MATERIALIZED"
+	CodeCoreTimeout              = "CORE_TIMEOUT"
+	CodeRequestCanceled          = "REQUEST_CANCELED"
+	CodeInternalError            = "INTERNAL_ERROR"
 )

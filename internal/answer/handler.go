@@ -105,6 +105,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.As(err, &vErr):
 			writeErrorResponse(w, http.StatusBadRequest, vErr.Error(), string(CodeValidationError))
+		case errors.Is(err, ErrWorkspaceNotMaterialized):
+			writeErrorResponse(w, http.StatusServiceUnavailable, "Workspace state is not materialized", string(CodeWorkspaceNotMaterialized))
 		case errors.Is(err, ErrCoreUnavailable):
 			writeErrorResponse(w, http.StatusServiceUnavailable, "Core engine is currently unavailable", string(CodeCoreUnavailable))
 		case errors.Is(err, ErrCoreTimeout):

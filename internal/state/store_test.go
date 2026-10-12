@@ -299,3 +299,61 @@ func TestStore_Provenance_ManyToManyAndIdempotency(t *testing.T) {
 		t.Errorf("expected 2 relationships supported by ev1, got %d (%v)", len(relsForEv1), relsForEv1)
 	}
 }
+
+func TestStore_ListWorkspaces_MemoryStore(t *testing.T) {
+	s := newTestMemoryStore()
+	ctx := context.Background()
+
+	// Empty store returns empty list
+	workspaces, err := s.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkspaces on empty store failed: %v", err)
+	}
+	if len(workspaces) != 0 {
+		t.Errorf("expected 0 workspaces, got %v", workspaces)
+	}
+
+	// Add resources to ws-beta
+	now := time.Now().UTC()
+	_ = s.SaveResources(ctx, "ws-beta", []state.Resource{
+		{Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p1"}, FirstObservedAt: now, LastObservedAt: now},
+	})
+
+	// Add relationships to ws-alpha
+	_ = s.SaveRelationships(ctx, "ws-alpha", []state.Relationship{
+		{
+			Source:   state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p1"},
+			Target:   state.ResourceIdentity{Provider: "k8s", ResourceType: "svc", ProviderID: "s1"},
+			Kind:     "DEPENDS_ON",
+			Category: "Dependency",
+		},
+	})
+
+	// Add evidence to ws-gamma
+	_ = s.SaveEvidence(ctx, "ws-gamma", []state.Evidence{
+		{
+			ID:              "ev-1",
+			Source:          state.EvidenceSource{Provider: "k8s", Collector: "runtime"},
+			ObservedAt:      now,
+			ObservationType: "RUNTIME_CONNECTION",
+			Subject:         state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p1"},
+			Data:            []byte("{}"),
+		},
+	})
+
+	workspaces, err = s.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkspaces failed: %v", err)
+	}
+
+	// Must be sorted and contain ws-alpha, ws-beta, ws-gamma
+	expected := []string{"ws-alpha", "ws-beta", "ws-gamma"}
+	if len(workspaces) != len(expected) {
+		t.Fatalf("expected %d workspaces, got %d (%v)", len(expected), len(workspaces), workspaces)
+	}
+	for i, exp := range expected {
+		if workspaces[i] != exp {
+			t.Errorf("at index %d: expected %s, got %s", i, exp, workspaces[i])
+		}
+	}
+}

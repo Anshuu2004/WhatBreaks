@@ -58,6 +58,9 @@ type Store interface {
 	// LoadAssembledState reconstructs the complete domain state snapshot for a workspace.
 	LoadAssembledState(ctx context.Context, workspaceID string) (*AssembledState, error)
 
+	// ListWorkspaces returns all distinct workspace IDs currently persisted in the store in deterministic order.
+	ListWorkspaces(ctx context.Context) ([]string, error)
+
 	// DeleteWorkspaceState clears all stored state for a workspace.
 	DeleteWorkspaceState(ctx context.Context, workspaceID string) error
 }

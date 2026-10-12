@@ -526,6 +526,25 @@ func TestClient_AnalyzeImpact_EmptyGraphSuccess(t *testing.T) {
 		MaxDepth:  5,
 	}
 
+	// 1. Unmaterialized workspace must fail with FailedPrecondition
+	_, err := client.AnalyzeImpact(ctx, req)
+	if err == nil {
+		t.Fatal("expected FailedPrecondition for unmaterialized workspace, got nil error")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", err)
+	}
+
+	// 2. Explicitly load empty state
+	_, err = client.LoadState(ctx, &corev1.LoadStateRequest{
+		WorkspaceId: "",
+	})
+	if err != nil {
+		t.Fatalf("LoadState failed: %v", err)
+	}
+
+	// 3. Materialized empty workspace returns legitimate 0-impact result
 	resp, err := client.AnalyzeImpact(ctx, req)
 	if err != nil {
 		t.Fatalf("AnalyzeImpact failed: %v", err)
@@ -542,6 +561,24 @@ func TestClient_AnalyzeImpact_EmptyGraphSuccess(t *testing.T) {
 	}
 	if resp.GetSummary().GetImpactedCount() != 0 {
 		t.Errorf("expected 0 impacted, got %d", resp.GetSummary().GetImpactedCount())
+	}
+}
+
+func TestClient_CheckLivenessAndInstanceID(t *testing.T) {
+	client, _ := startRustServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	instanceID, err := client.CheckLiveness(ctx)
+	if err != nil {
+		t.Fatalf("CheckLiveness failed: %v", err)
+	}
+	if instanceID == "" {
+		t.Fatal("expected non-empty server instance ID from liveness check")
+	}
+	if client.ServerInstanceID() != instanceID {
+		t.Errorf("expected ServerInstanceID %s, got %s", instanceID, client.ServerInstanceID())
 	}
 }
 

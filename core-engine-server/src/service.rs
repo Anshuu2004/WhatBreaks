@@ -16,12 +16,24 @@ use crate::convert::{discovery_result_to_proto, proto_to_evidence};
 #[derive(Clone)]
 pub struct DiscoveryServiceImpl {
     engine: Arc<DiscoveryEngine>,
+    instance_id: String,
 }
 
 impl DiscoveryServiceImpl {
     /// Create a new `DiscoveryServiceImpl` wrapping the provided engine.
     pub fn new(engine: Arc<DiscoveryEngine>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            instance_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    /// Create a new `DiscoveryServiceImpl` wrapping the provided engine and explicit server instance ID.
+    pub fn with_instance_id(engine: Arc<DiscoveryEngine>, instance_id: String) -> Self {
+        Self {
+            engine,
+            instance_id,
+        }
     }
 
     /// Create a `DiscoveryServiceImpl` with the default rule set.
@@ -32,6 +44,11 @@ impl DiscoveryServiceImpl {
     /// Return a reference to the inner `DiscoveryEngine`.
     pub fn engine(&self) -> &DiscoveryEngine {
         &self.engine
+    }
+
+    /// Return the server instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 }
 
@@ -57,9 +74,14 @@ impl DiscoveryService for DiscoveryServiceImpl {
         // 3. Convert domain results to protobuf responses.
         let proto_results = results.into_iter().map(discovery_result_to_proto).collect();
 
-        Ok(Response::new(RunDiscoveryResponse {
+        let mut resp = Response::new(RunDiscoveryResponse {
             results: proto_results,
-        }))
+        });
+        if let Ok(val) = self.instance_id.parse() {
+            resp.metadata_mut().insert("x-server-instance-id", val);
+        }
+
+        Ok(resp)
     }
 }
 
@@ -93,15 +115,41 @@ pub struct TenantState {
 ///
 /// Holds in-memory Graph, ProvenanceStore, and Evidence state per workspace (tenant)
 /// and delegates impact analysis to `AnswerEngine::analyze`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AnswerServiceImpl {
+    instance_id: String,
     tenants: Arc<RwLock<HashMap<String, TenantState>>>,
+}
+
+impl Default for AnswerServiceImpl {
+    fn default() -> Self {
+        Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            tenants: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl AnswerServiceImpl {
     /// Create a new `AnswerServiceImpl` wrapping the provided tenant map.
     pub fn new(tenants: Arc<RwLock<HashMap<String, TenantState>>>) -> Self {
-        Self { tenants }
+        Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            tenants,
+        }
+    }
+
+    /// Create an `AnswerServiceImpl` with an explicit server instance ID.
+    pub fn with_instance_id(instance_id: String) -> Self {
+        Self {
+            instance_id,
+            tenants: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Return the server instance ID.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Create an `AnswerServiceImpl` initialized with specific domain state in the default tenant ("").
@@ -116,6 +164,7 @@ impl AnswerServiceImpl {
             },
         );
         Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
             tenants: Arc::new(RwLock::new(map)),
         }
     }
@@ -161,8 +210,15 @@ impl AnswerService for AnswerServiceImpl {
             .read()
             .map_err(|_| Status::internal("tenants lock poisoned"))?;
 
-        let empty_state = TenantState::default();
-        let tenant_state = tenants.get(&ws_id).unwrap_or(&empty_state);
+        let tenant_state = match tenants.get(&ws_id) {
+            Some(state) => state,
+            None => {
+                return Err(Status::failed_precondition(format!(
+                    "workspace state not materialized for workspace_id: '{}'",
+                    ws_id
+                )));
+            }
+        };
 
         let answer = AnswerEngine::analyze(
             &tenant_state.graph,
@@ -172,7 +228,12 @@ impl AnswerService for AnswerServiceImpl {
         );
         let proto_resp = impact_answer_to_proto(answer);
 
-        Ok(Response::new(proto_resp))
+        let mut resp = Response::new(proto_resp);
+        if let Ok(val) = self.instance_id.parse() {
+            resp.metadata_mut().insert("x-server-instance-id", val);
+        }
+
+        Ok(resp)
     }
 
     async fn load_state(
@@ -214,11 +275,16 @@ impl AnswerService for AnswerServiceImpl {
 
         self.set_workspace_state(&workspace_id, graph, provenance, evidence);
 
-        Ok(Response::new(LoadStateResponse {
+        let mut resp = Response::new(LoadStateResponse {
             workspace_id,
             relationships_loaded: rel_count,
             evidence_loaded: ev_count,
             provenance_links_loaded: prov_count,
-        }))
+        });
+        if let Ok(val) = self.instance_id.parse() {
+            resp.metadata_mut().insert("x-server-instance-id", val);
+        }
+
+        Ok(resp)
     }
 }

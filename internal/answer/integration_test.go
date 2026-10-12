@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/answer"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/coreclient"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/logging"
@@ -95,6 +97,23 @@ func getFreeLocalAddr() (string, error) {
 	return l.Addr().String(), nil
 }
 
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
 func startServerProcess(t *testing.T, binPath string) (*coreclient.Client, string) {
 	t.Helper()
 
@@ -103,7 +122,7 @@ func startServerProcess(t *testing.T, binPath string) (*coreclient.Client, strin
 		t.Fatalf("failed to allocate free address: %v", err)
 	}
 
-	var logs bytes.Buffer
+	var logs safeBuffer
 	cmd := exec.Command(binPath)
 	cmd.Env = append(os.Environ(), "WB_CORE_GRPC_ADDR="+addr)
 	cmd.Stdout = &logs
@@ -216,14 +235,43 @@ func TestIntegration_GoAPIToGoAnswerServiceToRustAnswerService(t *testing.T) {
 		"max_depth": 3
 	}`
 
+	// 1. Unmaterialized workspace query must fail with HTTP 503 WORKSPACE_NOT_MATERIALIZED
 	resp, err := http.Post(ts.URL, "application/json", strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("HTTP POST failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected HTTP 200 OK across Go API -> Go Service -> Rust boundary, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected HTTP 503 Service Unavailable for unmaterialized workspace, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), string(answer.CodeWorkspaceNotMaterialized)) {
+		t.Fatalf("expected error body to contain %s, got %s", answer.CodeWorkspaceNotMaterialized, string(body))
+	}
+
+	// 2. Load state into Rust Core Engine
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, loadErr := client.LoadState(ctx, &corev1.LoadStateRequest{
+		WorkspaceId:   "",
+		Relationships: []*corev1.Relationship{},
+		Associations:  []*corev1.RelationshipEvidence{},
+		Evidence:      []*corev1.Evidence{},
+	})
+	if loadErr != nil {
+		t.Fatalf("LoadState failed: %v", loadErr)
+	}
+
+	// 3. Materialized workspace query must succeed with HTTP 200 OK
+	resp2, err := http.Post(ts.URL, "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("HTTP POST failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected HTTP 200 OK across Go API -> Go Service -> Rust boundary, got %d", resp2.StatusCode)
 	}
 }
 

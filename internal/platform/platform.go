@@ -16,23 +16,25 @@ import (
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/lifecycle"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/logging"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/scheduler"
+	"github.com/aaradhychinche-alt/WhatBreaks/internal/state"
 )
 
 // Platform encapsulates the top-level composition root and lifecycle coordination of WhatBreaks.
 type Platform struct {
-	Config       *config.PlatformConfig
-	Logger       logging.Logger
-	Database     *database.Database
-	Scheduler    *scheduler.TaskScheduler
-	APIServer    *api.Server
+	Config               *config.PlatformConfig
+	Logger               logging.Logger
+	Database             *database.Database
+	Scheduler            *scheduler.TaskScheduler
+	APIServer            *api.Server
 	HealthServer         *health.Server
 	K8sCollector         *k8s.Collector
 	DiscoveryCoordinator discovery.Coordinator
 	CoreClient           *coreclient.Client
-	Lifecycle    *lifecycle.ControllerLifecycle
-	Runtime      *lifecycle.Runtime
-	HealthState  *health.State
-	Tracker      lifecycle.WorkTracker
+	RecoveryManager      *state.RecoveryManager
+	Lifecycle            *lifecycle.ControllerLifecycle
+	Runtime              *lifecycle.Runtime
+	HealthState          *health.State
+	Tracker              lifecycle.WorkTracker
 
 	mu      sync.Mutex
 	running bool
@@ -41,6 +43,13 @@ type Platform struct {
 
 // Option configures optional Platform dependencies.
 type Option func(*Platform)
+
+// WithRecoveryManager assigns an initialized RecoveryManager to Platform.
+func WithRecoveryManager(rm *state.RecoveryManager) Option {
+	return func(p *Platform) {
+		p.RecoveryManager = rm
+	}
+}
 
 // WithDatabase assigns an initialized Database instance to Platform.
 func WithDatabase(db *database.Database) Option {
@@ -193,9 +202,32 @@ func (p *Platform) Start(ctx context.Context) error {
 		}
 	}
 
-	// 5. Update health state
+	// 5. Update health state and perform startup recovery
+	if p.RecoveryManager != nil {
+		p.Logger.Info("Performing startup recovery of persisted workspaces")
+		if err := p.RecoveryManager.RecoverAll(ctx); err != nil {
+			p.Logger.Error("Startup recovery failed", "error", err.Error())
+			p.HealthState.SetReady(false)
+			if p.K8sCollector != nil {
+				_ = p.K8sCollector.Stop(ctx)
+			}
+			if p.Scheduler != nil {
+				_ = p.Scheduler.Stop(ctx)
+			}
+			if p.APIServer != nil {
+				_ = p.APIServer.Close()
+			}
+			if p.HealthServer != nil {
+				_ = p.HealthServer.Close()
+			}
+			return fmt.Errorf("platform: startup recovery failed: %w", err)
+		}
+		p.RecoveryManager.StartMonitor(context.Background())
+	} else {
+		p.HealthState.SetReady(true)
+	}
+
 	p.HealthState.SetHealthy(true)
-	p.HealthState.SetReady(true)
 	p.running = true
 	p.stopped = false
 
@@ -204,6 +236,7 @@ func (p *Platform) Start(ctx context.Context) error {
 }
 
 // Stop executes graceful shutdown across all assembled subsystems in deterministic order:
+// 0. Stop recovery manager supervisor
 // 1. Set readiness to false (stop receiving external traffic)
 // 2. Stop scheduler from initiating new tasks
 // 3. Drain in-flight work and active HTTP connections
@@ -222,6 +255,11 @@ func (p *Platform) Stop(ctx context.Context) error {
 
 	p.Logger.Info("WhatBreaks platform stopping")
 	p.HealthState.SetReady(false)
+
+	// 0. Stop Recovery Manager if running
+	if p.RecoveryManager != nil {
+		p.RecoveryManager.Stop()
+	}
 
 	// 1. If ControllerLifecycle was configured, coordinate through lifecycle
 	if p.Lifecycle != nil {

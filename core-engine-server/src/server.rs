@@ -16,6 +16,14 @@ pub fn create_service(
     DiscoveryServiceServer::new(DiscoveryServiceImpl::new(engine))
 }
 
+/// Create a `DiscoveryServiceServer` wrapping a `DiscoveryServiceImpl` with the given engine and server instance ID.
+pub fn create_service_with_instance(
+    engine: Arc<DiscoveryEngine>,
+    instance_id: String,
+) -> DiscoveryServiceServer<DiscoveryServiceImpl> {
+    DiscoveryServiceServer::new(DiscoveryServiceImpl::with_instance_id(engine, instance_id))
+}
+
 /// Create an `AnswerServiceServer` wrapping an `AnswerServiceImpl`.
 pub fn create_answer_service(service: AnswerServiceImpl) -> AnswerServiceServer<AnswerServiceImpl> {
     AnswerServiceServer::new(service)
@@ -23,9 +31,10 @@ pub fn create_answer_service(service: AnswerServiceImpl) -> AnswerServiceServer<
 
 /// Run the gRPC server on the specified address with default v2 DiscoveryEngine and default AnswerServiceImpl.
 pub async fn run_server(addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    let instance_id = uuid::Uuid::new_v4().to_string();
     let engine = Arc::new(DiscoveryEngine::default_v2());
-    let discovery_svc = create_service(engine);
-    let answer_svc = create_answer_service(AnswerServiceImpl::default());
+    let discovery_svc = create_service_with_instance(engine, instance_id.clone());
+    let answer_svc = create_answer_service(AnswerServiceImpl::with_instance_id(instance_id));
 
     Server::builder()
         .add_service(discovery_svc)

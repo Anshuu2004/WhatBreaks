@@ -332,6 +332,29 @@ func TestHandler_CoreUnavailable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Test 11b: workspace not materialized
+// ---------------------------------------------------------------------------
+func TestHandler_WorkspaceNotMaterialized(t *testing.T) {
+	svc := &mockService{err: answer.ErrWorkspaceNotMaterialized}
+	h := answer.NewHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload()))
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable, got %d", rr.Code)
+	}
+
+	var errResp answer.ErrorResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &errResp)
+	if errResp.Code != string(answer.CodeWorkspaceNotMaterialized) {
+		t.Errorf("expected code %s, got %s", answer.CodeWorkspaceNotMaterialized, errResp.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test 12: core timeout
 // ---------------------------------------------------------------------------
 func TestHandler_CoreTimeout(t *testing.T) {

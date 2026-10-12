@@ -401,3 +401,30 @@ func (s *MemoryStore) DeleteWorkspaceState(ctx context.Context, workspaceID stri
 
 	return nil
 }
+
+// ListWorkspaces returns all distinct workspace IDs in memory, sorted ascending.
+func (s *MemoryStore) ListWorkspaces(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	for ws := range s.resources {
+		seen[ws] = struct{}{}
+	}
+	for ws := range s.relationships {
+		seen[ws] = struct{}{}
+	}
+	for ws := range s.evidence {
+		seen[ws] = struct{}{}
+	}
+
+	workspaces := make([]string, 0, len(seen))
+	for ws := range seen {
+		workspaces = append(workspaces, ws)
+	}
+	sort.Strings(workspaces)
+	return workspaces, nil
+}

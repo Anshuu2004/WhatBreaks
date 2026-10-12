@@ -100,13 +100,36 @@ async fn test_rpc_zero_max_depth() {
 }
 
 #[tokio::test]
-async fn test_rpc_empty_state_returns_empty_answer() {
+async fn test_rpc_unmaterialized_workspace_returns_failed_precondition() {
     let svc = AnswerServiceImpl::default();
     let req = Request::new(AnalyzeImpactRequest {
         target: Some(proto_identity("kubernetes", "service", "api")),
         direction: "incoming".to_string(),
         max_depth: 3,
         workspace_id: "".to_string(),
+        proposed_change: None,
+    });
+    let err = svc.analyze_impact(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert!(err.message().contains("workspace state not materialized"));
+}
+
+#[tokio::test]
+async fn test_rpc_materialized_empty_workspace_returns_empty_answer() {
+    let svc = AnswerServiceImpl::default();
+    let load_req = Request::new(proto::LoadStateRequest {
+        workspace_id: "empty-ws".to_string(),
+        relationships: vec![],
+        associations: vec![],
+        evidence: vec![],
+    });
+    svc.load_state(load_req).await.unwrap();
+
+    let req = Request::new(AnalyzeImpactRequest {
+        target: Some(proto_identity("kubernetes", "service", "api")),
+        direction: "incoming".to_string(),
+        max_depth: 3,
+        workspace_id: "empty-ws".to_string(),
         proposed_change: None,
     });
     let resp = svc.analyze_impact(req).await.unwrap().into_inner();
@@ -260,7 +283,7 @@ async fn test_rpc_load_state_and_workspace_isolation() {
     assert_eq!(resp_a.relationships.len(), 1);
     assert_eq!(resp_a.relationships[0].state, "Supported");
 
-    // Query impact for workspace-B (identical target identity) -> MUST BE ISOLATED (0 impacted)
+    // Query impact for unmaterialized workspace-B -> MUST FAIL with FailedPrecondition
     let req_b = Request::new(AnalyzeImpactRequest {
         target: Some(proto_identity("kubernetes", "service", "catalog")),
         direction: "incoming".to_string(),
@@ -268,10 +291,49 @@ async fn test_rpc_load_state_and_workspace_isolation() {
         workspace_id: "workspace-B".to_string(),
         proposed_change: None,
     });
-    let resp_b = answer_svc.analyze_impact(req_b).await.unwrap().into_inner();
+    let err_b = answer_svc.analyze_impact(req_b).await.unwrap_err();
+    assert_eq!(err_b.code(), Code::FailedPrecondition);
+
+    // Materialize empty state into workspace-B
+    let load_req_b = Request::new(proto::LoadStateRequest {
+        workspace_id: "workspace-B".to_string(),
+        relationships: vec![],
+        associations: vec![],
+        evidence: vec![],
+    });
+    answer_svc.load_state(load_req_b).await.unwrap();
+
+    // Query impact for materialized empty workspace-B -> MUST BE ISOLATED (0 impacted)
+    let req_b2 = Request::new(AnalyzeImpactRequest {
+        target: Some(proto_identity("kubernetes", "service", "catalog")),
+        direction: "incoming".to_string(),
+        max_depth: 3,
+        workspace_id: "workspace-B".to_string(),
+        proposed_change: None,
+    });
+    let resp_b = answer_svc
+        .analyze_impact(req_b2)
+        .await
+        .unwrap()
+        .into_inner();
     assert_eq!(resp_b.summary.unwrap().impacted_count, 0);
     assert!(resp_b.impacted_resources.is_empty());
     assert!(resp_b.relationships.is_empty());
+
+    // Workspace-A remains intact (1 impacted)
+    let req_a2 = Request::new(AnalyzeImpactRequest {
+        target: Some(proto_identity("kubernetes", "service", "catalog")),
+        direction: "incoming".to_string(),
+        max_depth: 3,
+        workspace_id: "workspace-A".to_string(),
+        proposed_change: None,
+    });
+    let resp_a2 = answer_svc
+        .analyze_impact(req_a2)
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp_a2.summary.unwrap().impacted_count, 1);
 }
 
 #[tokio::test]

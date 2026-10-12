@@ -146,7 +146,12 @@ func mapGRPCError(ctx context.Context, err error) error {
 		return ErrRequestCanceled
 	case codes.DeadlineExceeded:
 		return ErrCoreTimeout
-	case codes.Unavailable, codes.FailedPrecondition:
+	case codes.Unavailable:
+		return ErrCoreUnavailable
+	case codes.FailedPrecondition:
+		if strings.Contains(strings.ToLower(st.Message()), "not materialized") {
+			return ErrWorkspaceNotMaterialized
+		}
 		return ErrCoreUnavailable
 	case codes.InvalidArgument:
 		return &ValidationError{

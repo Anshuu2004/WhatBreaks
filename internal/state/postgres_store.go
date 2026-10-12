@@ -516,3 +516,42 @@ func (s *PostgresStore) DeleteWorkspaceState(ctx context.Context, workspaceID st
 		return nil
 	})
 }
+
+// ListWorkspaces queries distinct workspace IDs persisted in state_resources, state_relationships,
+// and state_evidence, returning them in deterministic ascending order.
+func (s *PostgresStore) ListWorkspaces(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	query := `
+	SELECT DISTINCT workspace_id FROM (
+		SELECT workspace_id FROM state_resources
+		UNION
+		SELECT workspace_id FROM state_relationships
+		UNION
+		SELECT workspace_id FROM state_evidence
+	) ws
+	ORDER BY workspace_id ASC;
+	`
+	rows, err := s.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspaces: %w", err)
+	}
+	defer rows.Close()
+
+	var workspaces []string
+	for rows.Next() {
+		var ws string
+		if err := rows.Scan(&ws); err != nil {
+			return nil, fmt.Errorf("failed to scan workspace_id: %w", err)
+		}
+		workspaces = append(workspaces, ws)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating workspace rows: %w", err)
+	}
+	if workspaces == nil {
+		return []string{}, nil
+	}
+	return workspaces, nil
+}

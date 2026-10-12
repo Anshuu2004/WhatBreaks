@@ -181,6 +181,15 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer, te
 				materializer := state.NewMaterializer(pgStore, coreClient, logger)
 				reconciler := state.NewReconciler(pgStore, coreClient, materializer, logger)
 				apiCfg.Reconciler = reconciler
+
+				recoveryMgr := state.NewRecoveryManager(
+					pgStore,
+					materializer,
+					coreClient,
+					healthState,
+					logger,
+				)
+				platformOpts = append(platformOpts, platform.WithRecoveryManager(recoveryMgr))
 			}
 		} else {
 			logger.Info("Rust Core Engine not reachable, impact analysis disabled", "address", *coreAddr, "reason", err.Error())

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -346,9 +347,28 @@ func TestEndToEnd_CollectorObservationToAnswerEngine(t *testing.T) {
 	// -----------------------------------------------------------------------
 	// 3. Multi-Tenant Isolation Verification
 	//
-	// Querying the EXACT SAME target in Workspace B MUST yield 0 impacted
+	// Unmaterialized Workspace B must reject queries with ErrWorkspaceNotMaterialized.
+	_, err = answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
+		WorkspaceID: workspaceB,
+		Target: &answer.ResourceIdentity{
+			Provider:     "aws",
+			ResourceType: "rds",
+			ProviderID:   "arn:aws:rds:us-east-1:123:payments-db",
+		},
+		Direction: "incoming",
+		MaxDepth:  5,
+	})
+	if !errors.Is(err, answer.ErrWorkspaceNotMaterialized) {
+		t.Fatalf("expected ErrWorkspaceNotMaterialized for unmaterialized Workspace B, got: %v", err)
+	}
+
+	// Explicitly materialize empty Workspace B
+	if _, err := materializer.Materialize(ctx, workspaceB); err != nil {
+		t.Fatalf("failed to materialize Workspace B: %v", err)
+	}
+
+	// Querying the EXACT SAME target in materialized Workspace B MUST yield 0 impacted
 	// resources and zero leakage from Workspace A.
-	// -----------------------------------------------------------------------
 	ansB, err := answerSvc.AnalyzeImpact(ctx, answer.ImpactRequest{
 		WorkspaceID: workspaceB,
 		Target: &answer.ResourceIdentity{

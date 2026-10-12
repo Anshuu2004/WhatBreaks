@@ -285,6 +285,11 @@ func TestService_ErrorPropagation(t *testing.T) {
 			wantErr: answer.ErrCoreUnavailable,
 		},
 		{
+			name:    "failed precondition not materialized",
+			grpcErr: status.Error(codes.FailedPrecondition, "workspace state not materialized for workspace_id: 'ws-1'"),
+			wantErr: answer.ErrWorkspaceNotMaterialized,
+		},
+		{
 			name:    "deadline exceeded",
 			grpcErr: status.Error(codes.DeadlineExceeded, "timed out"),
 			wantErr: answer.ErrCoreTimeout,

@@ -790,3 +790,106 @@ func TestPostgresStore_PartialCollectionSafety(t *testing.T) {
 	}
 }
 
+func TestPostgresStore_ListWorkspaces(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx := context.Background()
+
+	db, err := database.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("database.New failed: %v", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+
+	ws1 := "test-list-ws-1"
+	ws2 := "test-list-ws-2"
+	ws3 := "test-list-ws-3"
+
+	// Cleanup before & after
+	_ = pgStore.DeleteWorkspaceState(ctx, ws1)
+	_ = pgStore.DeleteWorkspaceState(ctx, ws2)
+	_ = pgStore.DeleteWorkspaceState(ctx, ws3)
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(ctx, ws1)
+		_ = pgStore.DeleteWorkspaceState(ctx, ws2)
+		_ = pgStore.DeleteWorkspaceState(ctx, ws3)
+	}()
+
+	now := time.Now().UTC()
+	err = pgStore.SaveResources(ctx, ws2, []state.Resource{
+		{
+			Identity:        state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "pod-2"},
+			FirstObservedAt: now,
+			LastObservedAt:  now,
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveResources failed: %v", err)
+	}
+
+	err = pgStore.SaveRelationships(ctx, ws1, []state.Relationship{
+		{
+			Source:   state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "pod-1"},
+			Target:   state.ResourceIdentity{Provider: "k8s", ResourceType: "svc", ProviderID: "svc-1"},
+			Kind:     "DEPENDS_ON",
+			Category: "Dependency",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveRelationships failed: %v", err)
+	}
+
+	// ws3 has evidence only (no resources, no relationships)
+	err = pgStore.SaveEvidence(ctx, ws3, []state.Evidence{
+		{
+			ID:              "ev-ws3-1",
+			Source:          state.EvidenceSource{Provider: "k8s", Collector: "runtime"},
+			ObservedAt:      now,
+			ObservationType: "RUNTIME_OBSERVATION",
+			Subject:         state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "pod-3"},
+			Data:            []byte("{}"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveEvidence failed: %v", err)
+	}
+
+	workspaces, err := pgStore.ListWorkspaces(ctx)
+	if err != nil {
+		t.Fatalf("ListWorkspaces failed: %v", err)
+	}
+
+	// Must contain test-list-ws-1, test-list-ws-2, test-list-ws-3 in sorted order
+	found1, found2, found3 := -1, -1, -1
+	for i, w := range workspaces {
+		if w == ws1 {
+			found1 = i
+		}
+		if w == ws2 {
+			found2 = i
+		}
+		if w == ws3 {
+			found3 = i
+		}
+	}
+
+	if found1 == -1 {
+		t.Errorf("expected %s in workspaces: %v", ws1, workspaces)
+	}
+	if found2 == -1 {
+		t.Errorf("expected %s in workspaces: %v", ws2, workspaces)
+	}
+	if found3 == -1 {
+		t.Errorf("expected %s in workspaces (evidence-only): %v", ws3, workspaces)
+	}
+	if found1 != -1 && found2 != -1 && found3 != -1 {
+		if !(found1 < found2 && found2 < found3) {
+			t.Errorf("expected %s < %s < %s in ordered workspaces, got indices %d, %d, %d", ws1, ws2, ws3, found1, found2, found3)
+		}
+	}
+}
