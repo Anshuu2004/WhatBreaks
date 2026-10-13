@@ -92,6 +92,112 @@ func (ChangeType) EnumDescriptor() ([]byte, []int) {
 	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{0}
 }
 
+// Completeness status of the impact analysis.
+type CompletenessStatus int32
+
+const (
+	CompletenessStatus_COMPLETENESS_STATUS_UNSPECIFIED CompletenessStatus = 0
+	CompletenessStatus_COMPLETENESS_STATUS_COMPLETE    CompletenessStatus = 1
+	CompletenessStatus_COMPLETENESS_STATUS_PARTIAL     CompletenessStatus = 2
+	CompletenessStatus_COMPLETENESS_STATUS_DEGRADED    CompletenessStatus = 3
+)
+
+// Enum value maps for CompletenessStatus.
+var (
+	CompletenessStatus_name = map[int32]string{
+		0: "COMPLETENESS_STATUS_UNSPECIFIED",
+		1: "COMPLETENESS_STATUS_COMPLETE",
+		2: "COMPLETENESS_STATUS_PARTIAL",
+		3: "COMPLETENESS_STATUS_DEGRADED",
+	}
+	CompletenessStatus_value = map[string]int32{
+		"COMPLETENESS_STATUS_UNSPECIFIED": 0,
+		"COMPLETENESS_STATUS_COMPLETE":    1,
+		"COMPLETENESS_STATUS_PARTIAL":     2,
+		"COMPLETENESS_STATUS_DEGRADED":    3,
+	}
+)
+
+func (x CompletenessStatus) Enum() *CompletenessStatus {
+	p := new(CompletenessStatus)
+	*p = x
+	return p
+}
+
+func (x CompletenessStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CompletenessStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_wb_core_v1_core_proto_enumTypes[1].Descriptor()
+}
+
+func (CompletenessStatus) Type() protoreflect.EnumType {
+	return &file_wb_core_v1_core_proto_enumTypes[1]
+}
+
+func (x CompletenessStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CompletenessStatus.Descriptor instead.
+func (CompletenessStatus) EnumDescriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{1}
+}
+
+// Severity level of an unknown-resource diagnostic item.
+type DiagnosticSeverity int32
+
+const (
+	DiagnosticSeverity_DIAGNOSTIC_SEVERITY_UNSPECIFIED DiagnosticSeverity = 0
+	DiagnosticSeverity_DIAGNOSTIC_SEVERITY_INFO        DiagnosticSeverity = 1
+	DiagnosticSeverity_DIAGNOSTIC_SEVERITY_WARNING     DiagnosticSeverity = 2
+	DiagnosticSeverity_DIAGNOSTIC_SEVERITY_ERROR       DiagnosticSeverity = 3
+)
+
+// Enum value maps for DiagnosticSeverity.
+var (
+	DiagnosticSeverity_name = map[int32]string{
+		0: "DIAGNOSTIC_SEVERITY_UNSPECIFIED",
+		1: "DIAGNOSTIC_SEVERITY_INFO",
+		2: "DIAGNOSTIC_SEVERITY_WARNING",
+		3: "DIAGNOSTIC_SEVERITY_ERROR",
+	}
+	DiagnosticSeverity_value = map[string]int32{
+		"DIAGNOSTIC_SEVERITY_UNSPECIFIED": 0,
+		"DIAGNOSTIC_SEVERITY_INFO":        1,
+		"DIAGNOSTIC_SEVERITY_WARNING":     2,
+		"DIAGNOSTIC_SEVERITY_ERROR":       3,
+	}
+)
+
+func (x DiagnosticSeverity) Enum() *DiagnosticSeverity {
+	p := new(DiagnosticSeverity)
+	*p = x
+	return p
+}
+
+func (x DiagnosticSeverity) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DiagnosticSeverity) Descriptor() protoreflect.EnumDescriptor {
+	return file_wb_core_v1_core_proto_enumTypes[2].Descriptor()
+}
+
+func (DiagnosticSeverity) Type() protoreflect.EnumType {
+	return &file_wb_core_v1_core_proto_enumTypes[2]
+}
+
+func (x DiagnosticSeverity) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DiagnosticSeverity.Descriptor instead.
+func (DiagnosticSeverity) EnumDescriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{2}
+}
+
 // ---------------------------------------------------------------------------
 // ResourceIdentity
 //
@@ -1439,6 +1545,152 @@ func (x *ExplanationFact) GetEvidenceIds() []string {
 	return nil
 }
 
+// Structured completeness metadata detailing whether the blast radius is authoritative.
+type AnalysisCompleteness struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	IsComplete    bool                   `protobuf:"varint,1,opt,name=is_complete,json=isComplete,proto3" json:"is_complete,omitempty"`
+	Status        CompletenessStatus     `protobuf:"varint,2,opt,name=status,proto3,enum=wb.core.v1.CompletenessStatus" json:"status,omitempty"`
+	Reasons       []string               `protobuf:"bytes,3,rep,name=reasons,proto3" json:"reasons,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnalysisCompleteness) Reset() {
+	*x = AnalysisCompleteness{}
+	mi := &file_wb_core_v1_core_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnalysisCompleteness) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnalysisCompleteness) ProtoMessage() {}
+
+func (x *AnalysisCompleteness) ProtoReflect() protoreflect.Message {
+	mi := &file_wb_core_v1_core_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnalysisCompleteness.ProtoReflect.Descriptor instead.
+func (*AnalysisCompleteness) Descriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *AnalysisCompleteness) GetIsComplete() bool {
+	if x != nil {
+		return x.IsComplete
+	}
+	return false
+}
+
+func (x *AnalysisCompleteness) GetStatus() CompletenessStatus {
+	if x != nil {
+		return x.Status
+	}
+	return CompletenessStatus_COMPLETENESS_STATUS_UNSPECIFIED
+}
+
+func (x *AnalysisCompleteness) GetReasons() []string {
+	if x != nil {
+		return x.Reasons
+	}
+	return nil
+}
+
+// Machine-readable diagnostic item detailing dependency or scope integrity findings.
+type DiagnosticItem struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Code                  string                 `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
+	Severity              DiagnosticSeverity     `protobuf:"varint,2,opt,name=severity,proto3,enum=wb.core.v1.DiagnosticSeverity" json:"severity,omitempty"`
+	Message               string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	Target                *ResourceIdentity      `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`
+	SupportingEvidenceIds []string               `protobuf:"bytes,5,rep,name=supporting_evidence_ids,json=supportingEvidenceIds,proto3" json:"supporting_evidence_ids,omitempty"` // UUIDv4 strings
+	Scope                 string                 `protobuf:"bytes,6,opt,name=scope,proto3" json:"scope,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *DiagnosticItem) Reset() {
+	*x = DiagnosticItem{}
+	mi := &file_wb_core_v1_core_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiagnosticItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiagnosticItem) ProtoMessage() {}
+
+func (x *DiagnosticItem) ProtoReflect() protoreflect.Message {
+	mi := &file_wb_core_v1_core_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiagnosticItem.ProtoReflect.Descriptor instead.
+func (*DiagnosticItem) Descriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *DiagnosticItem) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *DiagnosticItem) GetSeverity() DiagnosticSeverity {
+	if x != nil {
+		return x.Severity
+	}
+	return DiagnosticSeverity_DIAGNOSTIC_SEVERITY_UNSPECIFIED
+}
+
+func (x *DiagnosticItem) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *DiagnosticItem) GetTarget() *ResourceIdentity {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *DiagnosticItem) GetSupportingEvidenceIds() []string {
+	if x != nil {
+		return x.SupportingEvidenceIds
+	}
+	return nil
+}
+
+func (x *DiagnosticItem) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
 // Response from AnswerEngine containing structured, explainable impact facts.
 type AnalyzeImpactResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
@@ -1450,13 +1702,15 @@ type AnalyzeImpactResponse struct {
 	Evidence          []*AnswerEvidence      `protobuf:"bytes,6,rep,name=evidence,proto3" json:"evidence,omitempty"`
 	ExplanationFacts  []*ExplanationFact     `protobuf:"bytes,7,rep,name=explanation_facts,json=explanationFacts,proto3" json:"explanation_facts,omitempty"`
 	ChangeAssessment  *ChangeAssessment      `protobuf:"bytes,8,opt,name=change_assessment,json=changeAssessment,proto3" json:"change_assessment,omitempty"`
+	Completeness      *AnalysisCompleteness  `protobuf:"bytes,9,opt,name=completeness,proto3" json:"completeness,omitempty"`
+	Diagnostics       []*DiagnosticItem      `protobuf:"bytes,10,rep,name=diagnostics,proto3" json:"diagnostics,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
 func (x *AnalyzeImpactResponse) Reset() {
 	*x = AnalyzeImpactResponse{}
-	mi := &file_wb_core_v1_core_proto_msgTypes[20]
+	mi := &file_wb_core_v1_core_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1468,7 +1722,7 @@ func (x *AnalyzeImpactResponse) String() string {
 func (*AnalyzeImpactResponse) ProtoMessage() {}
 
 func (x *AnalyzeImpactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wb_core_v1_core_proto_msgTypes[20]
+	mi := &file_wb_core_v1_core_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1481,7 +1735,7 @@ func (x *AnalyzeImpactResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnalyzeImpactResponse.ProtoReflect.Descriptor instead.
 func (*AnalyzeImpactResponse) Descriptor() ([]byte, []int) {
-	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{20}
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *AnalyzeImpactResponse) GetTarget() *ResourceIdentity {
@@ -1540,6 +1794,20 @@ func (x *AnalyzeImpactResponse) GetChangeAssessment() *ChangeAssessment {
 	return nil
 }
 
+func (x *AnalyzeImpactResponse) GetCompleteness() *AnalysisCompleteness {
+	if x != nil {
+		return x.Completeness
+	}
+	return nil
+}
+
+func (x *AnalyzeImpactResponse) GetDiagnostics() []*DiagnosticItem {
+	if x != nil {
+		return x.Diagnostics
+	}
+	return nil
+}
+
 // Association between a relationship and its supporting evidence observations.
 type RelationshipEvidence struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1551,7 +1819,7 @@ type RelationshipEvidence struct {
 
 func (x *RelationshipEvidence) Reset() {
 	*x = RelationshipEvidence{}
-	mi := &file_wb_core_v1_core_proto_msgTypes[21]
+	mi := &file_wb_core_v1_core_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1563,7 +1831,7 @@ func (x *RelationshipEvidence) String() string {
 func (*RelationshipEvidence) ProtoMessage() {}
 
 func (x *RelationshipEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_wb_core_v1_core_proto_msgTypes[21]
+	mi := &file_wb_core_v1_core_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1576,7 +1844,7 @@ func (x *RelationshipEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RelationshipEvidence.ProtoReflect.Descriptor instead.
 func (*RelationshipEvidence) Descriptor() ([]byte, []int) {
-	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{21}
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *RelationshipEvidence) GetRelationship() *Relationship {
@@ -1610,7 +1878,7 @@ type LoadStateRequest struct {
 
 func (x *LoadStateRequest) Reset() {
 	*x = LoadStateRequest{}
-	mi := &file_wb_core_v1_core_proto_msgTypes[22]
+	mi := &file_wb_core_v1_core_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1622,7 +1890,7 @@ func (x *LoadStateRequest) String() string {
 func (*LoadStateRequest) ProtoMessage() {}
 
 func (x *LoadStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_wb_core_v1_core_proto_msgTypes[22]
+	mi := &file_wb_core_v1_core_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1635,7 +1903,7 @@ func (x *LoadStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoadStateRequest.ProtoReflect.Descriptor instead.
 func (*LoadStateRequest) Descriptor() ([]byte, []int) {
-	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{22}
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *LoadStateRequest) GetWorkspaceId() string {
@@ -1679,7 +1947,7 @@ type LoadStateResponse struct {
 
 func (x *LoadStateResponse) Reset() {
 	*x = LoadStateResponse{}
-	mi := &file_wb_core_v1_core_proto_msgTypes[23]
+	mi := &file_wb_core_v1_core_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1691,7 +1959,7 @@ func (x *LoadStateResponse) String() string {
 func (*LoadStateResponse) ProtoMessage() {}
 
 func (x *LoadStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_wb_core_v1_core_proto_msgTypes[23]
+	mi := &file_wb_core_v1_core_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1704,7 +1972,7 @@ func (x *LoadStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoadStateResponse.ProtoReflect.Descriptor instead.
 func (*LoadStateResponse) Descriptor() ([]byte, []int) {
-	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{23}
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *LoadStateResponse) GetWorkspaceId() string {
@@ -1826,7 +2094,19 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"\x0fExplanationFact\x12*\n" +
 	"\x04path\x18\x01 \x01(\v2\x16.wb.core.v1.ImpactPathR\x04path\x12D\n" +
 	"\rrelationships\x18\x02 \x03(\v2\x1e.wb.core.v1.AnswerRelationshipR\rrelationships\x12!\n" +
-	"\fevidence_ids\x18\x03 \x03(\tR\vevidenceIds\"\x90\x04\n" +
+	"\fevidence_ids\x18\x03 \x03(\tR\vevidenceIds\"\x89\x01\n" +
+	"\x14AnalysisCompleteness\x12\x1f\n" +
+	"\vis_complete\x18\x01 \x01(\bR\n" +
+	"isComplete\x126\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x1e.wb.core.v1.CompletenessStatusR\x06status\x12\x18\n" +
+	"\areasons\x18\x03 \x03(\tR\areasons\"\xfe\x01\n" +
+	"\x0eDiagnosticItem\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\tR\x04code\x12:\n" +
+	"\bseverity\x18\x02 \x01(\x0e2\x1e.wb.core.v1.DiagnosticSeverityR\bseverity\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x124\n" +
+	"\x06target\x18\x04 \x01(\v2\x1c.wb.core.v1.ResourceIdentityR\x06target\x126\n" +
+	"\x17supporting_evidence_ids\x18\x05 \x03(\tR\x15supportingEvidenceIds\x12\x14\n" +
+	"\x05scope\x18\x06 \x01(\tR\x05scope\"\x94\x05\n" +
 	"\x15AnalyzeImpactResponse\x124\n" +
 	"\x06target\x18\x01 \x01(\v2\x1c.wb.core.v1.ResourceIdentityR\x06target\x123\n" +
 	"\asummary\x18\x02 \x01(\v2\x19.wb.core.v1.ImpactSummaryR\asummary\x12K\n" +
@@ -1835,7 +2115,10 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"\x05paths\x18\x05 \x03(\v2\x16.wb.core.v1.ImpactPathR\x05paths\x126\n" +
 	"\bevidence\x18\x06 \x03(\v2\x1a.wb.core.v1.AnswerEvidenceR\bevidence\x12H\n" +
 	"\x11explanation_facts\x18\a \x03(\v2\x1b.wb.core.v1.ExplanationFactR\x10explanationFacts\x12I\n" +
-	"\x11change_assessment\x18\b \x01(\v2\x1c.wb.core.v1.ChangeAssessmentR\x10changeAssessment\"w\n" +
+	"\x11change_assessment\x18\b \x01(\v2\x1c.wb.core.v1.ChangeAssessmentR\x10changeAssessment\x12D\n" +
+	"\fcompleteness\x18\t \x01(\v2 .wb.core.v1.AnalysisCompletenessR\fcompleteness\x12<\n" +
+	"\vdiagnostics\x18\n" +
+	" \x03(\v2\x1a.wb.core.v1.DiagnosticItemR\vdiagnostics\"w\n" +
 	"\x14RelationshipEvidence\x12<\n" +
 	"\frelationship\x18\x01 \x01(\v2\x18.wb.core.v1.RelationshipR\frelationship\x12!\n" +
 	"\fevidence_ids\x18\x02 \x03(\tR\vevidenceIds\"\xed\x01\n" +
@@ -1855,7 +2138,17 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"\x12CHANGE_TYPE_DELETE\x10\x01\x12\x16\n" +
 	"\x12CHANGE_TYPE_UPDATE\x10\x02\x12\x15\n" +
 	"\x11CHANGE_TYPE_SCALE\x10\x03\x12\x17\n" +
-	"\x13CHANGE_TYPE_REPLACE\x10\x042e\n" +
+	"\x13CHANGE_TYPE_REPLACE\x10\x04*\x9e\x01\n" +
+	"\x12CompletenessStatus\x12#\n" +
+	"\x1fCOMPLETENESS_STATUS_UNSPECIFIED\x10\x00\x12 \n" +
+	"\x1cCOMPLETENESS_STATUS_COMPLETE\x10\x01\x12\x1f\n" +
+	"\x1bCOMPLETENESS_STATUS_PARTIAL\x10\x02\x12 \n" +
+	"\x1cCOMPLETENESS_STATUS_DEGRADED\x10\x03*\x97\x01\n" +
+	"\x12DiagnosticSeverity\x12#\n" +
+	"\x1fDIAGNOSTIC_SEVERITY_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18DIAGNOSTIC_SEVERITY_INFO\x10\x01\x12\x1f\n" +
+	"\x1bDIAGNOSTIC_SEVERITY_WARNING\x10\x02\x12\x1d\n" +
+	"\x19DIAGNOSTIC_SEVERITY_ERROR\x10\x032e\n" +
 	"\x10DiscoveryService\x12Q\n" +
 	"\fRunDiscovery\x12\x1f.wb.core.v1.RunDiscoveryRequest\x1a .wb.core.v1.RunDiscoveryResponse2\xaf\x01\n" +
 	"\rAnswerService\x12T\n" +
@@ -1874,81 +2167,90 @@ func file_wb_core_v1_core_proto_rawDescGZIP() []byte {
 	return file_wb_core_v1_core_proto_rawDescData
 }
 
-var file_wb_core_v1_core_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_wb_core_v1_core_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_wb_core_v1_core_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_wb_core_v1_core_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_wb_core_v1_core_proto_goTypes = []any{
 	(ChangeType)(0),                // 0: wb.core.v1.ChangeType
-	(*ResourceIdentity)(nil),       // 1: wb.core.v1.ResourceIdentity
-	(*EvidenceSource)(nil),         // 2: wb.core.v1.EvidenceSource
-	(*Evidence)(nil),               // 3: wb.core.v1.Evidence
-	(*Relationship)(nil),           // 4: wb.core.v1.Relationship
-	(*DiscoveredRelationship)(nil), // 5: wb.core.v1.DiscoveredRelationship
-	(*DiscoveryResult)(nil),        // 6: wb.core.v1.DiscoveryResult
-	(*Insufficient)(nil),           // 7: wb.core.v1.Insufficient
-	(*Conflict)(nil),               // 8: wb.core.v1.Conflict
-	(*Invalid)(nil),                // 9: wb.core.v1.Invalid
-	(*RunDiscoveryRequest)(nil),    // 10: wb.core.v1.RunDiscoveryRequest
-	(*RunDiscoveryResponse)(nil),   // 11: wb.core.v1.RunDiscoveryResponse
-	(*ProposedChange)(nil),         // 12: wb.core.v1.ProposedChange
-	(*ChangeAssessment)(nil),       // 13: wb.core.v1.ChangeAssessment
-	(*AnalyzeImpactRequest)(nil),   // 14: wb.core.v1.AnalyzeImpactRequest
-	(*ImpactSummary)(nil),          // 15: wb.core.v1.ImpactSummary
-	(*ImpactedResource)(nil),       // 16: wb.core.v1.ImpactedResource
-	(*AnswerRelationship)(nil),     // 17: wb.core.v1.AnswerRelationship
-	(*ImpactPath)(nil),             // 18: wb.core.v1.ImpactPath
-	(*AnswerEvidence)(nil),         // 19: wb.core.v1.AnswerEvidence
-	(*ExplanationFact)(nil),        // 20: wb.core.v1.ExplanationFact
-	(*AnalyzeImpactResponse)(nil),  // 21: wb.core.v1.AnalyzeImpactResponse
-	(*RelationshipEvidence)(nil),   // 22: wb.core.v1.RelationshipEvidence
-	(*LoadStateRequest)(nil),       // 23: wb.core.v1.LoadStateRequest
-	(*LoadStateResponse)(nil),      // 24: wb.core.v1.LoadStateResponse
+	(CompletenessStatus)(0),        // 1: wb.core.v1.CompletenessStatus
+	(DiagnosticSeverity)(0),        // 2: wb.core.v1.DiagnosticSeverity
+	(*ResourceIdentity)(nil),       // 3: wb.core.v1.ResourceIdentity
+	(*EvidenceSource)(nil),         // 4: wb.core.v1.EvidenceSource
+	(*Evidence)(nil),               // 5: wb.core.v1.Evidence
+	(*Relationship)(nil),           // 6: wb.core.v1.Relationship
+	(*DiscoveredRelationship)(nil), // 7: wb.core.v1.DiscoveredRelationship
+	(*DiscoveryResult)(nil),        // 8: wb.core.v1.DiscoveryResult
+	(*Insufficient)(nil),           // 9: wb.core.v1.Insufficient
+	(*Conflict)(nil),               // 10: wb.core.v1.Conflict
+	(*Invalid)(nil),                // 11: wb.core.v1.Invalid
+	(*RunDiscoveryRequest)(nil),    // 12: wb.core.v1.RunDiscoveryRequest
+	(*RunDiscoveryResponse)(nil),   // 13: wb.core.v1.RunDiscoveryResponse
+	(*ProposedChange)(nil),         // 14: wb.core.v1.ProposedChange
+	(*ChangeAssessment)(nil),       // 15: wb.core.v1.ChangeAssessment
+	(*AnalyzeImpactRequest)(nil),   // 16: wb.core.v1.AnalyzeImpactRequest
+	(*ImpactSummary)(nil),          // 17: wb.core.v1.ImpactSummary
+	(*ImpactedResource)(nil),       // 18: wb.core.v1.ImpactedResource
+	(*AnswerRelationship)(nil),     // 19: wb.core.v1.AnswerRelationship
+	(*ImpactPath)(nil),             // 20: wb.core.v1.ImpactPath
+	(*AnswerEvidence)(nil),         // 21: wb.core.v1.AnswerEvidence
+	(*ExplanationFact)(nil),        // 22: wb.core.v1.ExplanationFact
+	(*AnalysisCompleteness)(nil),   // 23: wb.core.v1.AnalysisCompleteness
+	(*DiagnosticItem)(nil),         // 24: wb.core.v1.DiagnosticItem
+	(*AnalyzeImpactResponse)(nil),  // 25: wb.core.v1.AnalyzeImpactResponse
+	(*RelationshipEvidence)(nil),   // 26: wb.core.v1.RelationshipEvidence
+	(*LoadStateRequest)(nil),       // 27: wb.core.v1.LoadStateRequest
+	(*LoadStateResponse)(nil),      // 28: wb.core.v1.LoadStateResponse
 }
 var file_wb_core_v1_core_proto_depIdxs = []int32{
-	2,  // 0: wb.core.v1.Evidence.source:type_name -> wb.core.v1.EvidenceSource
-	1,  // 1: wb.core.v1.Evidence.subject:type_name -> wb.core.v1.ResourceIdentity
-	1,  // 2: wb.core.v1.Relationship.source:type_name -> wb.core.v1.ResourceIdentity
-	1,  // 3: wb.core.v1.Relationship.target:type_name -> wb.core.v1.ResourceIdentity
-	4,  // 4: wb.core.v1.DiscoveredRelationship.relationship:type_name -> wb.core.v1.Relationship
-	5,  // 5: wb.core.v1.DiscoveryResult.discovered:type_name -> wb.core.v1.DiscoveredRelationship
-	7,  // 6: wb.core.v1.DiscoveryResult.insufficient:type_name -> wb.core.v1.Insufficient
-	8,  // 7: wb.core.v1.DiscoveryResult.conflict:type_name -> wb.core.v1.Conflict
-	9,  // 8: wb.core.v1.DiscoveryResult.invalid:type_name -> wb.core.v1.Invalid
-	3,  // 9: wb.core.v1.RunDiscoveryRequest.evidence:type_name -> wb.core.v1.Evidence
-	6,  // 10: wb.core.v1.RunDiscoveryResponse.results:type_name -> wb.core.v1.DiscoveryResult
+	4,  // 0: wb.core.v1.Evidence.source:type_name -> wb.core.v1.EvidenceSource
+	3,  // 1: wb.core.v1.Evidence.subject:type_name -> wb.core.v1.ResourceIdentity
+	3,  // 2: wb.core.v1.Relationship.source:type_name -> wb.core.v1.ResourceIdentity
+	3,  // 3: wb.core.v1.Relationship.target:type_name -> wb.core.v1.ResourceIdentity
+	6,  // 4: wb.core.v1.DiscoveredRelationship.relationship:type_name -> wb.core.v1.Relationship
+	7,  // 5: wb.core.v1.DiscoveryResult.discovered:type_name -> wb.core.v1.DiscoveredRelationship
+	9,  // 6: wb.core.v1.DiscoveryResult.insufficient:type_name -> wb.core.v1.Insufficient
+	10, // 7: wb.core.v1.DiscoveryResult.conflict:type_name -> wb.core.v1.Conflict
+	11, // 8: wb.core.v1.DiscoveryResult.invalid:type_name -> wb.core.v1.Invalid
+	5,  // 9: wb.core.v1.RunDiscoveryRequest.evidence:type_name -> wb.core.v1.Evidence
+	8,  // 10: wb.core.v1.RunDiscoveryResponse.results:type_name -> wb.core.v1.DiscoveryResult
 	0,  // 11: wb.core.v1.ProposedChange.change_type:type_name -> wb.core.v1.ChangeType
 	0,  // 12: wb.core.v1.ChangeAssessment.change_type:type_name -> wb.core.v1.ChangeType
-	1,  // 13: wb.core.v1.AnalyzeImpactRequest.target:type_name -> wb.core.v1.ResourceIdentity
-	12, // 14: wb.core.v1.AnalyzeImpactRequest.proposed_change:type_name -> wb.core.v1.ProposedChange
-	1,  // 15: wb.core.v1.ImpactedResource.resource:type_name -> wb.core.v1.ResourceIdentity
-	4,  // 16: wb.core.v1.AnswerRelationship.relationship:type_name -> wb.core.v1.Relationship
-	1,  // 17: wb.core.v1.ImpactPath.resources:type_name -> wb.core.v1.ResourceIdentity
-	4,  // 18: wb.core.v1.ImpactPath.relationships:type_name -> wb.core.v1.Relationship
-	2,  // 19: wb.core.v1.AnswerEvidence.source:type_name -> wb.core.v1.EvidenceSource
-	18, // 20: wb.core.v1.ExplanationFact.path:type_name -> wb.core.v1.ImpactPath
-	17, // 21: wb.core.v1.ExplanationFact.relationships:type_name -> wb.core.v1.AnswerRelationship
-	1,  // 22: wb.core.v1.AnalyzeImpactResponse.target:type_name -> wb.core.v1.ResourceIdentity
-	15, // 23: wb.core.v1.AnalyzeImpactResponse.summary:type_name -> wb.core.v1.ImpactSummary
-	16, // 24: wb.core.v1.AnalyzeImpactResponse.impacted_resources:type_name -> wb.core.v1.ImpactedResource
-	17, // 25: wb.core.v1.AnalyzeImpactResponse.relationships:type_name -> wb.core.v1.AnswerRelationship
-	18, // 26: wb.core.v1.AnalyzeImpactResponse.paths:type_name -> wb.core.v1.ImpactPath
-	19, // 27: wb.core.v1.AnalyzeImpactResponse.evidence:type_name -> wb.core.v1.AnswerEvidence
-	20, // 28: wb.core.v1.AnalyzeImpactResponse.explanation_facts:type_name -> wb.core.v1.ExplanationFact
-	13, // 29: wb.core.v1.AnalyzeImpactResponse.change_assessment:type_name -> wb.core.v1.ChangeAssessment
-	4,  // 30: wb.core.v1.RelationshipEvidence.relationship:type_name -> wb.core.v1.Relationship
-	4,  // 31: wb.core.v1.LoadStateRequest.relationships:type_name -> wb.core.v1.Relationship
-	22, // 32: wb.core.v1.LoadStateRequest.associations:type_name -> wb.core.v1.RelationshipEvidence
-	3,  // 33: wb.core.v1.LoadStateRequest.evidence:type_name -> wb.core.v1.Evidence
-	10, // 34: wb.core.v1.DiscoveryService.RunDiscovery:input_type -> wb.core.v1.RunDiscoveryRequest
-	14, // 35: wb.core.v1.AnswerService.AnalyzeImpact:input_type -> wb.core.v1.AnalyzeImpactRequest
-	23, // 36: wb.core.v1.AnswerService.LoadState:input_type -> wb.core.v1.LoadStateRequest
-	11, // 37: wb.core.v1.DiscoveryService.RunDiscovery:output_type -> wb.core.v1.RunDiscoveryResponse
-	21, // 38: wb.core.v1.AnswerService.AnalyzeImpact:output_type -> wb.core.v1.AnalyzeImpactResponse
-	24, // 39: wb.core.v1.AnswerService.LoadState:output_type -> wb.core.v1.LoadStateResponse
-	37, // [37:40] is the sub-list for method output_type
-	34, // [34:37] is the sub-list for method input_type
-	34, // [34:34] is the sub-list for extension type_name
-	34, // [34:34] is the sub-list for extension extendee
-	0,  // [0:34] is the sub-list for field type_name
+	3,  // 13: wb.core.v1.AnalyzeImpactRequest.target:type_name -> wb.core.v1.ResourceIdentity
+	14, // 14: wb.core.v1.AnalyzeImpactRequest.proposed_change:type_name -> wb.core.v1.ProposedChange
+	3,  // 15: wb.core.v1.ImpactedResource.resource:type_name -> wb.core.v1.ResourceIdentity
+	6,  // 16: wb.core.v1.AnswerRelationship.relationship:type_name -> wb.core.v1.Relationship
+	3,  // 17: wb.core.v1.ImpactPath.resources:type_name -> wb.core.v1.ResourceIdentity
+	6,  // 18: wb.core.v1.ImpactPath.relationships:type_name -> wb.core.v1.Relationship
+	4,  // 19: wb.core.v1.AnswerEvidence.source:type_name -> wb.core.v1.EvidenceSource
+	20, // 20: wb.core.v1.ExplanationFact.path:type_name -> wb.core.v1.ImpactPath
+	19, // 21: wb.core.v1.ExplanationFact.relationships:type_name -> wb.core.v1.AnswerRelationship
+	1,  // 22: wb.core.v1.AnalysisCompleteness.status:type_name -> wb.core.v1.CompletenessStatus
+	2,  // 23: wb.core.v1.DiagnosticItem.severity:type_name -> wb.core.v1.DiagnosticSeverity
+	3,  // 24: wb.core.v1.DiagnosticItem.target:type_name -> wb.core.v1.ResourceIdentity
+	3,  // 25: wb.core.v1.AnalyzeImpactResponse.target:type_name -> wb.core.v1.ResourceIdentity
+	17, // 26: wb.core.v1.AnalyzeImpactResponse.summary:type_name -> wb.core.v1.ImpactSummary
+	18, // 27: wb.core.v1.AnalyzeImpactResponse.impacted_resources:type_name -> wb.core.v1.ImpactedResource
+	19, // 28: wb.core.v1.AnalyzeImpactResponse.relationships:type_name -> wb.core.v1.AnswerRelationship
+	20, // 29: wb.core.v1.AnalyzeImpactResponse.paths:type_name -> wb.core.v1.ImpactPath
+	21, // 30: wb.core.v1.AnalyzeImpactResponse.evidence:type_name -> wb.core.v1.AnswerEvidence
+	22, // 31: wb.core.v1.AnalyzeImpactResponse.explanation_facts:type_name -> wb.core.v1.ExplanationFact
+	15, // 32: wb.core.v1.AnalyzeImpactResponse.change_assessment:type_name -> wb.core.v1.ChangeAssessment
+	23, // 33: wb.core.v1.AnalyzeImpactResponse.completeness:type_name -> wb.core.v1.AnalysisCompleteness
+	24, // 34: wb.core.v1.AnalyzeImpactResponse.diagnostics:type_name -> wb.core.v1.DiagnosticItem
+	6,  // 35: wb.core.v1.RelationshipEvidence.relationship:type_name -> wb.core.v1.Relationship
+	6,  // 36: wb.core.v1.LoadStateRequest.relationships:type_name -> wb.core.v1.Relationship
+	26, // 37: wb.core.v1.LoadStateRequest.associations:type_name -> wb.core.v1.RelationshipEvidence
+	5,  // 38: wb.core.v1.LoadStateRequest.evidence:type_name -> wb.core.v1.Evidence
+	12, // 39: wb.core.v1.DiscoveryService.RunDiscovery:input_type -> wb.core.v1.RunDiscoveryRequest
+	16, // 40: wb.core.v1.AnswerService.AnalyzeImpact:input_type -> wb.core.v1.AnalyzeImpactRequest
+	27, // 41: wb.core.v1.AnswerService.LoadState:input_type -> wb.core.v1.LoadStateRequest
+	13, // 42: wb.core.v1.DiscoveryService.RunDiscovery:output_type -> wb.core.v1.RunDiscoveryResponse
+	25, // 43: wb.core.v1.AnswerService.AnalyzeImpact:output_type -> wb.core.v1.AnalyzeImpactResponse
+	28, // 44: wb.core.v1.AnswerService.LoadState:output_type -> wb.core.v1.LoadStateResponse
+	42, // [42:45] is the sub-list for method output_type
+	39, // [39:42] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_wb_core_v1_core_proto_init() }
@@ -1967,8 +2269,8 @@ func file_wb_core_v1_core_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wb_core_v1_core_proto_rawDesc), len(file_wb_core_v1_core_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   24,
+			NumEnums:      3,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

@@ -204,62 +204,120 @@ impl ProposedChange {
 
     /// Factual explanation of why a resource is impacted at a specific depth and relationship kind.
     pub fn impact_reason(&self, kind: Option<&str>, depth: usize) -> String {
-        let kind_str = kind.unwrap_or("relationship");
-        match (self.change_type, depth) {
-            (ChangeType::Delete, 1) => {
-                format!(
-                    "Direct dependent via {}: target resource is proposed for deletion",
-                    kind_str
-                )
-            }
-            (ChangeType::Delete, d) => {
-                format!(
-                    "Indirect dependent at depth {}: transitively affected by target deletion",
-                    d
-                )
-            }
-            (ChangeType::Update, 1) => {
-                format!(
-                    "Direct dependent via {}: may require reload or restart to consume updated target state",
-                    kind_str
-                )
-            }
-            (ChangeType::Update, d) => {
-                format!(
-                    "Indirect dependent at depth {}: potential transitive update impact",
-                    d
-                )
-            }
-            (ChangeType::Scale, 1) => {
-                format!(
-                    "Direct runtime caller via {}: subject to traffic capacity, latency, or concurrency changes",
-                    kind_str
-                )
-            }
-            (ChangeType::Scale, d) => {
-                format!(
-                    "Indirect runtime caller at depth {}: potential downstream concurrency impact",
-                    d
-                )
-            }
-            (ChangeType::Replace, 1) => {
-                format!(
-                    "Direct connection via {}: subject to transient rollover or reconnection during replacement",
-                    kind_str
-                )
-            }
-            (ChangeType::Replace, d) => {
-                format!(
-                    "Indirect connection at depth {}: potential transitive rollover impact",
-                    d
-                )
-            }
-        }
+        self.impact_reason_directional(kind, TraversalDirection::Incoming, depth)
     }
 
     /// Return a depth-based impact reason when relationship kind is not yet resolved.
     pub fn impact_reason_for_depth(&self, depth: usize) -> String {
-        self.impact_reason(None, depth)
+        self.impact_reason_directional(None, TraversalDirection::Incoming, depth)
+    }
+
+    /// Direction-aware factual explanation of why a resource is impacted.
+    pub fn impact_reason_directional(
+        &self,
+        kind: Option<&str>,
+        direction: TraversalDirection,
+        depth: usize,
+    ) -> String {
+        let kind_str = kind.unwrap_or("relationship");
+        let consequence = match (self.change_type, depth) {
+            (ChangeType::Delete, 1) => "target resource is proposed for deletion",
+            (ChangeType::Delete, _) => "transitively affected by target deletion",
+            (ChangeType::Update, 1) => {
+                "may require reload or restart to consume updated target state"
+            }
+            (ChangeType::Update, _) => "potential transitive update impact",
+            (ChangeType::Scale, 1) => {
+                "subject to traffic capacity, latency, or concurrency changes"
+            }
+            (ChangeType::Scale, _) => "potential downstream concurrency impact",
+            (ChangeType::Replace, 1) => {
+                "subject to transient rollover or reconnection during replacement"
+            }
+            (ChangeType::Replace, _) => "potential transitive rollover impact",
+        };
+
+        if depth == 1 {
+            match direction {
+                TraversalDirection::Incoming => match kind {
+                    Some("CALLS") => {
+                        format!("Direct runtime caller via CALLS: {}", consequence)
+                    }
+                    Some("DEPENDS_ON") => {
+                        format!("Direct dependent via DEPENDS_ON: {}", consequence)
+                    }
+                    Some("READS_FROM") => {
+                        format!("Direct data consumer via READS_FROM: {}", consequence)
+                    }
+                    Some("WRITES_TO") => {
+                        format!("Direct data producer via WRITES_TO: {}", consequence)
+                    }
+                    Some(k) => format!("Direct connection via {}: {}", k, consequence),
+                    None => {
+                        if self.change_type == ChangeType::Scale {
+                            format!("Direct runtime caller via {}: {}", kind_str, consequence)
+                        } else if self.change_type == ChangeType::Replace {
+                            format!("Direct connection via {}: {}", kind_str, consequence)
+                        } else {
+                            format!("Direct dependent via {}: {}", kind_str, consequence)
+                        }
+                    }
+                },
+                TraversalDirection::Outgoing => match kind {
+                    Some("CALLS") => {
+                        format!("Direct runtime callee via CALLS: {}", consequence)
+                    }
+                    Some("DEPENDS_ON") => {
+                        format!("Direct dependency via DEPENDS_ON: {}", consequence)
+                    }
+                    Some("READS_FROM") => {
+                        format!("Direct data source via READS_FROM: {}", consequence)
+                    }
+                    Some("WRITES_TO") => {
+                        format!("Direct data sink via WRITES_TO: {}", consequence)
+                    }
+                    Some(k) => {
+                        format!("Direct outgoing connection via {}: {}", k, consequence)
+                    }
+                    None => {
+                        if self.change_type == ChangeType::Scale {
+                            format!("Direct runtime callee via {}: {}", kind_str, consequence)
+                        } else if self.change_type == ChangeType::Replace {
+                            format!("Direct connection via {}: {}", kind_str, consequence)
+                        } else {
+                            format!("Direct dependency via {}: {}", kind_str, consequence)
+                        }
+                    }
+                },
+            }
+        } else {
+            match direction {
+                TraversalDirection::Incoming => {
+                    if self.change_type == ChangeType::Scale {
+                        format!(
+                            "Indirect runtime caller at depth {}: {}",
+                            depth, consequence
+                        )
+                    } else if self.change_type == ChangeType::Replace {
+                        format!("Indirect connection at depth {}: {}", depth, consequence)
+                    } else {
+                        format!("Indirect dependent at depth {}: {}", depth, consequence)
+                    }
+                }
+                TraversalDirection::Outgoing => {
+                    if self.change_type == ChangeType::Scale {
+                        format!(
+                            "Indirect runtime callee at depth {}: {}",
+                            depth, consequence
+                        )
+                    } else if self.change_type == ChangeType::Replace {
+                        format!("Indirect connection at depth {}: {}", depth, consequence)
+                    } else {
+                        format!("Indirect dependency at depth {}: {}", depth, consequence)
+                    }
+                }
+            }
+        }
     }
 
     /// High-level assessment of the nature of the impact.
@@ -620,7 +678,27 @@ impl ImpactEngine {
                     } else {
                         "INDIRECT"
                     };
-                    let impact_reason = change.impact_reason_for_depth(node.depth);
+                    let rel_kind = if node.depth == 1 {
+                        match request.direction {
+                            TraversalDirection::Incoming => graph
+                                .get_relationships_to(&request.target)
+                                .into_iter()
+                                .find(|r| r.source == node.resource && change.propagates(&r.kind))
+                                .map(|r| r.kind.as_str().to_string()),
+                            TraversalDirection::Outgoing => graph
+                                .get_relationships_from(&request.target)
+                                .into_iter()
+                                .find(|r| r.target == node.resource && change.propagates(&r.kind))
+                                .map(|r| r.kind.as_str().to_string()),
+                        }
+                    } else {
+                        None
+                    };
+                    let impact_reason = change.impact_reason_directional(
+                        rel_kind.as_deref(),
+                        request.direction,
+                        node.depth,
+                    );
                     ImpactedResource::with_details(
                         node.resource,
                         node.depth,
@@ -1688,9 +1766,15 @@ mod tests {
 
         // When analyzing incoming impact on svc: pod must NOT be impacted.
         // When analyzing outgoing impact on svc: pod must NOT be impacted.
-        for ct in [ChangeType::Delete, ChangeType::Update, ChangeType::Scale, ChangeType::Replace] {
+        for ct in [
+            ChangeType::Delete,
+            ChangeType::Update,
+            ChangeType::Scale,
+            ChangeType::Replace,
+        ] {
             let change = ProposedChange::new(ct);
-            let in_req = ImpactRequest::incoming(svc.clone(), 5).with_proposed_change(change.clone());
+            let in_req =
+                ImpactRequest::incoming(svc.clone(), 5).with_proposed_change(change.clone());
             let in_res = ImpactEngine::analyze(&g, &in_req);
             assert_eq!(
                 in_res.len(),

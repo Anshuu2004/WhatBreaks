@@ -310,6 +310,39 @@ message ExplanationFact {
   repeated string evidence_ids = 3; // UUIDv4 strings
 }
 
+// Completeness status of the impact analysis.
+enum CompletenessStatus {
+  COMPLETENESS_STATUS_UNSPECIFIED = 0;
+  COMPLETENESS_STATUS_COMPLETE = 1;
+  COMPLETENESS_STATUS_PARTIAL = 2;
+  COMPLETENESS_STATUS_DEGRADED = 3;
+}
+
+// Structured completeness metadata detailing whether the blast radius is authoritative.
+message AnalysisCompleteness {
+  bool is_complete = 1;
+  CompletenessStatus status = 2;
+  repeated string reasons = 3;
+}
+
+// Severity level of an unknown-resource diagnostic item.
+enum DiagnosticSeverity {
+  DIAGNOSTIC_SEVERITY_UNSPECIFIED = 0;
+  DIAGNOSTIC_SEVERITY_INFO = 1;
+  DIAGNOSTIC_SEVERITY_WARNING = 2;
+  DIAGNOSTIC_SEVERITY_ERROR = 3;
+}
+
+// Machine-readable diagnostic item detailing dependency or scope integrity findings.
+message DiagnosticItem {
+  string code = 1;
+  DiagnosticSeverity severity = 2;
+  string message = 3;
+  ResourceIdentity target = 4;
+  repeated string supporting_evidence_ids = 5; // UUIDv4 strings
+  string scope = 6;
+}
+
 // Response from AnswerEngine containing structured, explainable impact facts.
 message AnalyzeImpactResponse {
   ResourceIdentity target = 1;
@@ -320,6 +353,8 @@ message AnalyzeImpactResponse {
   repeated AnswerEvidence evidence = 6;
   repeated ExplanationFact explanation_facts = 7;
   ChangeAssessment change_assessment = 8;
+  AnalysisCompleteness completeness = 9;
+  repeated DiagnosticItem diagnostics = 10;
 }
 
 // ---------------------------------------------------------------------------

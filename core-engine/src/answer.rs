@@ -65,7 +65,7 @@ use crate::evidence::{Evidence, EvidenceId, EvidenceSource, ObservationType};
 use crate::graph::Graph;
 use crate::history::{RelationshipState, RelationshipStateDerivation};
 use crate::impact::{
-    propagates_impact, ChangeAssessment, ImpactEngine, ImpactRequest, ImpactedResource,
+    propagates_impact, ChangeAssessment, ChangeType, ImpactEngine, ImpactRequest, ImpactedResource,
     ProposedChange,
 };
 use crate::provenance::ProvenanceStore;
@@ -652,25 +652,44 @@ impl AnswerEngine {
             .into_iter()
             .map(|mut ir| {
                 if let Some(ref change) = request.proposed_change {
-                    let rel_kind = paths.iter().find_map(|p| {
-                        if p.resources.contains(&ir.resource) {
-                            p.relationships.iter().find_map(|r| {
-                                if r.source == ir.resource || r.target == ir.resource {
-                                    Some(r.kind.as_str())
-                                } else {
-                                    None
+                    let matching_path = paths
+                        .iter()
+                        .find(|p| {
+                            p.len() == ir.depth
+                                && match request.direction {
+                                    TraversalDirection::Incoming => {
+                                        p.resources.first() == Some(&ir.resource)
+                                    }
+                                    TraversalDirection::Outgoing => {
+                                        p.resources.last() == Some(&ir.resource)
+                                    }
+                                }
+                        })
+                        .or_else(|| {
+                            paths.iter().find(|p| match request.direction {
+                                TraversalDirection::Incoming => {
+                                    p.resources.first() == Some(&ir.resource)
+                                }
+                                TraversalDirection::Outgoing => {
+                                    p.resources.last() == Some(&ir.resource)
                                 }
                             })
-                        } else {
-                            None
-                        }
-                    });
+                        });
+
                     ir.impact_type = Some(if ir.depth == 1 {
                         "DIRECT".to_string()
                     } else {
                         "INDIRECT".to_string()
                     });
-                    ir.impact_reason = Some(change.impact_reason(rel_kind, ir.depth));
+                    ir.impact_reason = Some(Self::explain_impact(
+                        change,
+                        &request.target,
+                        &ir.resource,
+                        request.direction,
+                        ir.depth,
+                        matching_path,
+                        &paths,
+                    ));
                 }
                 ir
             })
@@ -696,6 +715,162 @@ impl AnswerEngine {
             explanation_facts,
             change_assessment,
         )
+    }
+
+    /// Generate a direction-aware, factually grounded explanation for an impacted resource.
+    fn explain_impact(
+        change: &ProposedChange,
+        target: &ResourceIdentity,
+        impacted: &ResourceIdentity,
+        direction: TraversalDirection,
+        depth: usize,
+        matching_path: Option<&ImpactPath>,
+        paths: &[ImpactPath],
+    ) -> String {
+        let consequence = match (change.change_type, depth) {
+            (ChangeType::Delete, 1) => "target resource is proposed for deletion",
+            (ChangeType::Delete, _) => "transitively affected by target deletion",
+            (ChangeType::Update, 1) => {
+                "may require reload or restart to consume updated target state"
+            }
+            (ChangeType::Update, _) => "potential transitive update impact",
+            (ChangeType::Scale, 1) => {
+                "subject to traffic capacity, latency, or concurrency changes"
+            }
+            (ChangeType::Scale, _) => "potential downstream concurrency impact",
+            (ChangeType::Replace, 1) => {
+                "subject to transient rollover or reconnection during replacement"
+            }
+            (ChangeType::Replace, _) => "potential transitive rollover impact",
+        };
+
+        if depth == 1 {
+            let rel_opt = matching_path
+                .and_then(|p| p.relationships.first().cloned())
+                .or_else(|| {
+                    paths.iter().find_map(|p| {
+                        p.relationships
+                            .iter()
+                            .find(|r| {
+                                (r.source == *impacted && r.target == *target)
+                                    || (r.source == *target && r.target == *impacted)
+                            })
+                            .cloned()
+                    })
+                });
+
+            if let Some(rel) = rel_opt {
+                let kind_str = rel.kind.as_str();
+                if rel.source == *impacted && rel.target == *target {
+                    let (role, desc) = match rel.kind.as_str() {
+                        "DEPENDS_ON" => (
+                            "Direct dependent via DEPENDS_ON".to_string(),
+                            format!("{} depends on {}", impacted, target),
+                        ),
+                        "CALLS" => (
+                            "Direct runtime caller via CALLS".to_string(),
+                            format!("{} calls {}", impacted, target),
+                        ),
+                        "READS_FROM" => (
+                            "Direct data consumer via READS_FROM".to_string(),
+                            format!("{} reads from {}", impacted, target),
+                        ),
+                        "WRITES_TO" => (
+                            "Direct data producer via WRITES_TO".to_string(),
+                            format!("{} writes to {}", impacted, target),
+                        ),
+                        _ => (
+                            format!("Direct connection via {}", kind_str),
+                            format!("{} -> {}", impacted, target),
+                        ),
+                    };
+                    format!("{} ({}): {}", role, desc, consequence)
+                } else if rel.source == *target && rel.target == *impacted {
+                    let (role, desc) = match rel.kind.as_str() {
+                        "DEPENDS_ON" => (
+                            "Direct dependency via DEPENDS_ON".to_string(),
+                            format!("{} depends on {}", target, impacted),
+                        ),
+                        "CALLS" => (
+                            "Direct runtime callee via CALLS".to_string(),
+                            format!("{} calls {}", target, impacted),
+                        ),
+                        "READS_FROM" => (
+                            "Direct data source via READS_FROM".to_string(),
+                            format!("{} reads from {}", target, impacted),
+                        ),
+                        "WRITES_TO" => (
+                            "Direct data sink via WRITES_TO".to_string(),
+                            format!("{} writes to {}", target, impacted),
+                        ),
+                        _ => (
+                            format!("Direct outgoing connection via {}", kind_str),
+                            format!("{} -> {}", target, impacted),
+                        ),
+                    };
+                    format!("{} ({}): {}", role, desc, consequence)
+                } else {
+                    change.impact_reason_directional(Some(kind_str), direction, depth)
+                }
+            } else {
+                change.impact_reason_directional(None, direction, depth)
+            }
+        } else {
+            if let Some(path) = matching_path {
+                let chain_str = path
+                    .resources
+                    .iter()
+                    .map(|r| r.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+
+                let role = match direction {
+                    TraversalDirection::Incoming => match change.change_type {
+                        ChangeType::Scale => {
+                            format!(
+                                "Indirect runtime caller at depth {} via chain {}",
+                                depth, chain_str
+                            )
+                        }
+                        ChangeType::Replace => {
+                            format!(
+                                "Indirect connection at depth {} via chain {}",
+                                depth, chain_str
+                            )
+                        }
+                        _ => {
+                            format!(
+                                "Indirect dependent at depth {} via chain {}",
+                                depth, chain_str
+                            )
+                        }
+                    },
+                    TraversalDirection::Outgoing => match change.change_type {
+                        ChangeType::Scale => {
+                            format!(
+                                "Indirect runtime callee at depth {} via chain {}",
+                                depth, chain_str
+                            )
+                        }
+                        ChangeType::Replace => {
+                            format!(
+                                "Indirect connection at depth {} via chain {}",
+                                depth, chain_str
+                            )
+                        }
+                        _ => {
+                            format!(
+                                "Indirect dependency at depth {} via chain {}",
+                                depth, chain_str
+                            )
+                        }
+                    },
+                };
+                format!("{}: {}", role, consequence)
+            } else {
+                change.impact_reason_directional(None, direction, depth)
+            }
+        }
     }
 
     /// Reconstruct deterministic propagating paths up to the effective max depth.
@@ -2061,5 +2236,303 @@ mod tests {
         assert!(ans.change_assessment.is_none());
         assert!(ans.impacted_resources[0].impact_type.is_none());
         assert!(ans.impacted_resources[0].impact_reason.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 36. Direction-Aware Explanations: Case A - Direct Dependent
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_36_direct_dependent_explanation_direction() {
+        let mut g = Graph::new();
+        let mut prov = ProvenanceStore::new();
+
+        let frontend = make_identity("frontend");
+        let database = make_identity("database");
+
+        let rel = Relationship::new(
+            frontend.clone(),
+            database.clone(),
+            RelationshipKind::DEPENDS_ON,
+        );
+        g.add_relationship(rel.clone());
+        prov.add_relationship(rel.clone());
+
+        let req = AnswerRequest::incoming(database.clone(), 3)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Delete));
+        let ans = AnswerEngine::analyze(&g, &prov, &[], &req);
+
+        assert_eq!(ans.summary.impacted_count, 1);
+        assert_eq!(ans.impacted_resources[0].resource, frontend);
+        assert_eq!(ans.impacted_resources[0].depth, 1);
+        assert_eq!(
+            ans.impacted_resources[0].impact_type.as_deref(),
+            Some("DIRECT")
+        );
+
+        let reason = ans.impacted_resources[0]
+            .impact_reason
+            .as_deref()
+            .unwrap_or_default();
+        // Explanation must correctly say frontend depends on database
+        assert!(
+            reason.contains("depends on"),
+            "Explanation must explicitly state 'depends on': {}",
+            reason
+        );
+        assert!(
+            reason.contains(&frontend.to_string()),
+            "Explanation must identify frontend as dependent: {}",
+            reason
+        );
+        assert!(
+            reason.contains(&database.to_string()),
+            "Explanation must identify database as target: {}",
+            reason
+        );
+        // Must not reverse the relationship
+        assert!(
+            !reason.contains(&format!("{} depends on {}", database, frontend)),
+            "Explanation must not reverse the relationship direction: {}",
+            reason
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 37. Direction-Aware Explanations: Case B - Transitive Dependent
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_37_transitive_dependent_chain_explanation() {
+        let mut g = Graph::new();
+        let mut prov = ProvenanceStore::new();
+
+        let frontend = make_identity("frontend");
+        let backend = make_identity("backend");
+        let database = make_identity("database");
+
+        let r1 = Relationship::new(
+            frontend.clone(),
+            backend.clone(),
+            RelationshipKind::DEPENDS_ON,
+        );
+        let r2 = Relationship::new(
+            backend.clone(),
+            database.clone(),
+            RelationshipKind::DEPENDS_ON,
+        );
+        g.add_relationship(r1.clone());
+        g.add_relationship(r2.clone());
+        prov.add_relationship(r1.clone());
+        prov.add_relationship(r2.clone());
+
+        let req = AnswerRequest::incoming(database.clone(), 5)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Delete));
+        let ans = AnswerEngine::analyze(&g, &prov, &[], &req);
+
+        assert_eq!(ans.summary.impacted_count, 2);
+        assert_eq!(ans.summary.direct_count, 1);
+        assert_eq!(ans.summary.indirect_count, 1);
+
+        // Backend is direct potential impact at depth 1
+        let backend_impact = ans
+            .impacted_resources
+            .iter()
+            .find(|ir| ir.resource == backend)
+            .unwrap();
+        assert_eq!(backend_impact.depth, 1);
+        assert_eq!(backend_impact.impact_type.as_deref(), Some("DIRECT"));
+        let backend_reason = backend_impact.impact_reason.as_deref().unwrap_or_default();
+        assert!(backend_reason.contains("depends on"));
+        assert!(backend_reason.contains(&database.to_string()));
+
+        // Frontend is transitive potential impact at depth 2
+        let frontend_impact = ans
+            .impacted_resources
+            .iter()
+            .find(|ir| ir.resource == frontend)
+            .unwrap();
+        assert_eq!(frontend_impact.depth, 2);
+        assert_eq!(frontend_impact.impact_type.as_deref(), Some("INDIRECT"));
+        let frontend_reason = frontend_impact.impact_reason.as_deref().unwrap_or_default();
+        // Explanation must identify the correct dependency chain
+        assert!(
+            frontend_reason.contains("chain"),
+            "Explanation must identify the dependency chain: {}",
+            frontend_reason
+        );
+        assert!(
+            frontend_reason.contains(&backend.to_string()),
+            "Explanation chain must include intermediate backend: {}",
+            frontend_reason
+        );
+        // Must not claim frontend directly depends on database
+        assert!(
+            !frontend_reason.contains(&format!("{} depends on {}", frontend, database)),
+            "Must not claim frontend directly depends on database: {}",
+            frontend_reason
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 38. Direction-Aware Explanations: Case C - Outgoing Dependency Isolation
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_38_outgoing_dependency_not_impacted_on_incoming_change() {
+        let mut g = Graph::new();
+        let mut prov = ProvenanceStore::new();
+
+        let frontend = make_identity("frontend");
+        let backend = make_identity("backend");
+
+        let rel = Relationship::new(
+            frontend.clone(),
+            backend.clone(),
+            RelationshipKind::DEPENDS_ON,
+        );
+        g.add_relationship(rel.clone());
+        prov.add_relationship(rel.clone());
+
+        // Change target is frontend (UPDATE frontend).
+        // Standard blast radius queries incoming dependents of frontend.
+        let req_incoming = AnswerRequest::incoming(frontend.clone(), 3)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Update));
+        let ans_incoming = AnswerEngine::analyze(&g, &prov, &[], &req_incoming);
+
+        // Backend must NOT be reported as impacted merely because Frontend depends on Backend
+        assert_eq!(ans_incoming.summary.impacted_count, 0);
+        assert!(ans_incoming.impacted_resources.is_empty());
+
+        // If explicitly querying outgoing dependencies:
+        let req_outgoing = AnswerRequest::outgoing(frontend.clone(), 3)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Update));
+        let ans_outgoing = AnswerEngine::analyze(&g, &prov, &[], &req_outgoing);
+        assert_eq!(ans_outgoing.summary.impacted_count, 1);
+        let out_reason = ans_outgoing.impacted_resources[0]
+            .impact_reason
+            .as_deref()
+            .unwrap_or_default();
+        // Outgoing explanation must say frontend depends on backend, labeling backend as dependency
+        assert!(out_reason.contains("dependency") || out_reason.contains("depends on"));
+        assert!(!out_reason.contains("Direct dependent"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 39. Direction-Aware Explanations: Case D - Runtime CALLS Direction
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_39_runtime_calls_direction_identifies_caller_and_callee() {
+        let mut g = Graph::new();
+        let mut prov = ProvenanceStore::new();
+
+        let caller = make_identity("api-caller");
+        let callee = make_identity("service-callee");
+
+        // caller --CALLS--> callee
+        let rel = Relationship::new(caller.clone(), callee.clone(), RelationshipKind::CALLS);
+        g.add_relationship(rel.clone());
+        prov.add_relationship(rel.clone());
+
+        // Target is callee (SCALE service-callee)
+        let req = AnswerRequest::incoming(callee.clone(), 3)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Scale));
+        let ans = AnswerEngine::analyze(&g, &prov, &[], &req);
+
+        assert_eq!(ans.summary.impacted_count, 1);
+        assert_eq!(ans.impacted_resources[0].resource, caller);
+        let reason = ans.impacted_resources[0]
+            .impact_reason
+            .as_deref()
+            .unwrap_or_default();
+        // Must identify caller as caller and callee as callee
+        assert!(
+            reason.contains("calls"),
+            "Explanation must state that caller calls callee: {}",
+            reason
+        );
+        assert!(
+            reason.contains(&caller.to_string()),
+            "Explanation must include caller: {}",
+            reason
+        );
+        assert!(
+            reason.contains(&callee.to_string()),
+            "Explanation must include callee: {}",
+            reason
+        );
+        assert!(
+            !reason.contains(&format!("{} calls {}", callee, caller)),
+            "Explanation must not invert caller and callee: {}",
+            reason
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 40. Direction-Aware Explanations: Case E - Boundary Relationships
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_40_boundary_relationships_owns_and_routes_to_suppressed() {
+        let mut g = Graph::new();
+        let mut prov = ProvenanceStore::new();
+
+        let parent = make_identity("deployment-parent");
+        let child = make_identity("pod-child");
+        let router = make_identity("service-router");
+
+        let r_owns = Relationship::new(parent.clone(), child.clone(), RelationshipKind::OWNS);
+        let r_routes =
+            Relationship::new(router.clone(), child.clone(), RelationshipKind::ROUTES_TO);
+        g.add_relationship(r_owns.clone());
+        g.add_relationship(r_routes.clone());
+        prov.add_relationship(r_owns.clone());
+        prov.add_relationship(r_routes.clone());
+
+        let req = AnswerRequest::incoming(child.clone(), 3)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Delete));
+        let ans = AnswerEngine::analyze(&g, &prov, &[], &req);
+
+        // Neither OWNS nor ROUTES_TO propagates impact
+        assert_eq!(ans.summary.impacted_count, 0);
+        assert!(ans.impacted_resources.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 41. Direction-Aware Explanations: Case F - Provenance Consistency
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_41_provenance_only_cites_supporting_path_evidence() {
+        let mut g = Graph::new();
+        let mut prov = ProvenanceStore::new();
+
+        let target = make_identity("db");
+        let hop1 = make_identity("service");
+        let unrelated = make_identity("unrelated");
+
+        let rel1 = Relationship::new(hop1.clone(), target.clone(), RelationshipKind::DEPENDS_ON);
+        let rel_unrelated =
+            Relationship::new(unrelated.clone(), target.clone(), RelationshipKind::OWNS);
+
+        g.add_relationship(rel1.clone());
+        g.add_relationship(rel_unrelated.clone());
+        prov.add_relationship(rel1.clone());
+        prov.add_relationship(rel_unrelated.clone());
+
+        let ev1 = make_evidence("k8s", "c1", &hop1);
+        let ev_unrelated = make_evidence("k8s", "c2", &unrelated);
+        prov.add_evidence(&rel1, ev1.id);
+        prov.add_evidence(&rel_unrelated, ev_unrelated.id);
+
+        let catalog = vec![ev1.clone(), ev_unrelated.clone()];
+
+        let req = AnswerRequest::incoming(target.clone(), 3)
+            .with_proposed_change(ProposedChange::new(crate::impact::ChangeType::Delete));
+        let ans = AnswerEngine::analyze(&g, &prov, &catalog, &req);
+
+        assert_eq!(ans.summary.impacted_count, 1);
+        assert_eq!(ans.explanation_facts.len(), 1);
+
+        let fact = &ans.explanation_facts[0];
+        assert_eq!(fact.relationships.len(), 1);
+        assert_eq!(fact.relationships[0].relationship, rel1);
+        assert!(fact.evidence_ids.contains(&ev1.id));
+        assert!(!fact.evidence_ids.contains(&ev_unrelated.id));
     }
 }

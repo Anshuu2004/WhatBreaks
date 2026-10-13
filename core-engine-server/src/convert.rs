@@ -439,5 +439,7 @@ pub fn impact_answer_to_proto(ans: ImpactAnswer) -> proto::AnalyzeImpactResponse
             .change_assessment
             .as_ref()
             .map(change_assessment_to_proto),
+        completeness: None,
+        diagnostics: Vec::new(),
     }
 }

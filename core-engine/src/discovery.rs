@@ -299,9 +299,8 @@ impl DiscoveryRule for RuntimeConnectionRule {
         for mapping_ev in &mappings {
             if let Some(ep) = Endpoint::from_mapping(mapping_ev) {
                 let targets = endpoint_to_targets.entry(ep).or_default();
-                if let Some((_, evidence_ids)) = targets
-                    .iter_mut()
-                    .find(|(ri, _)| ri == &mapping_ev.subject)
+                if let Some((_, evidence_ids)) =
+                    targets.iter_mut().find(|(ri, _)| ri == &mapping_ev.subject)
                 {
                     if !evidence_ids.contains(&mapping_ev.id) {
                         evidence_ids.push(mapping_ev.id);
@@ -657,7 +656,10 @@ impl DiscoveryRule for ResourceReferenceRule {
             // Skip pure network endpoint mappings intended for RuntimeConnectionRule,
             // and skip EndpointSlice routing references intended for EndpointSliceRule.
             if let Some(ref_type) = ev.data.get("reference_type").and_then(|v| v.as_str()) {
-                if ref_type == "service_endpoint" || ref_type == "node_address" || ref_type == "endpoint_slice_member" {
+                if ref_type == "service_endpoint"
+                    || ref_type == "node_address"
+                    || ref_type == "endpoint_slice_member"
+                {
                     continue;
                 }
             } else if ev.data.get("address").is_some() && ev.data.get("target").is_none() {
@@ -754,9 +756,7 @@ impl DiscoveryRule for EndpointSliceRule {
             .iter()
             .filter(|e| {
                 e.observation_type == ObservationType::RESOURCE_REFERENCE
-                    && e.data
-                        .get("reference_type")
-                        .and_then(|v| v.as_str())
+                    && e.data.get("reference_type").and_then(|v| v.as_str())
                         == Some("endpoint_slice_member")
             })
             .collect();
@@ -773,7 +773,9 @@ impl DiscoveryRule for EndpointSliceRule {
 
         for ev in &slice_evidences {
             // Validate that the source is a Kubernetes Service
-            if ev.subject.provider.as_str() != "kubernetes" || ev.subject.resource_type.as_str() != "service" {
+            if ev.subject.provider.as_str() != "kubernetes"
+                || ev.subject.resource_type.as_str() != "service"
+            {
                 continue;
             }
 
@@ -801,7 +803,9 @@ impl DiscoveryRule for EndpointSliceRule {
             };
 
             // Validate that the target is a Kubernetes Pod
-            if target_identity.provider.as_str() != "kubernetes" || target_identity.resource_type.as_str() != "pod" {
+            if target_identity.provider.as_str() != "kubernetes"
+                || target_identity.resource_type.as_str() != "pod"
+            {
                 continue;
             }
 
@@ -2802,7 +2806,10 @@ mod tests {
 
         let rule = EndpointSliceRule;
         let results = rule.apply(&[ev_unready, ev_terminating]);
-        assert!(results.is_empty(), "unready/terminating endpoints must not create ROUTES_TO");
+        assert!(
+            results.is_empty(),
+            "unready/terminating endpoints must not create ROUTES_TO"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2888,7 +2895,10 @@ mod tests {
             }),
         );
         let res_non_svc = rule.apply(&[ev_non_svc]);
-        assert!(res_non_svc.is_empty(), "non-Service source must not produce ROUTES_TO");
+        assert!(
+            res_non_svc.is_empty(),
+            "non-Service source must not produce ROUTES_TO"
+        );
 
         // 2. Negative: Source from wrong provider (e.g. AWS)
         let aws_svc = ResourceIdentity::new(
@@ -2908,7 +2918,10 @@ mod tests {
             }),
         );
         let res_wrong_prov_src = rule.apply(&[ev_wrong_prov_src]);
-        assert!(res_wrong_prov_src.is_empty(), "source from wrong provider must not produce ROUTES_TO");
+        assert!(
+            res_wrong_prov_src.is_empty(),
+            "source from wrong provider must not produce ROUTES_TO"
+        );
 
         // 3. Negative: Non-Pod target (e.g. Node)
         let ev_non_pod = Evidence::new(
@@ -2927,7 +2940,10 @@ mod tests {
             }),
         );
         let res_non_pod = rule.apply(&[ev_non_pod]);
-        assert!(res_non_pod.is_empty(), "non-Pod target must not produce ROUTES_TO");
+        assert!(
+            res_non_pod.is_empty(),
+            "non-Pod target must not produce ROUTES_TO"
+        );
 
         // 4. Negative: Target from wrong provider (e.g. AWS)
         let ev_wrong_prov_tgt = Evidence::new(
@@ -2946,7 +2962,10 @@ mod tests {
             }),
         );
         let res_wrong_prov_tgt = rule.apply(&[ev_wrong_prov_tgt]);
-        assert!(res_wrong_prov_tgt.is_empty(), "target from wrong provider must not produce ROUTES_TO");
+        assert!(
+            res_wrong_prov_tgt.is_empty(),
+            "target from wrong provider must not produce ROUTES_TO"
+        );
 
         // 5. Positive: Valid Kubernetes Service -> Kubernetes Pod produces ROUTES_TO
         let ev_valid = Evidence::new(
@@ -2961,11 +2980,18 @@ mod tests {
             }),
         );
         let res_valid = rule.apply(&[ev_valid]);
-        assert_eq!(res_valid.len(), 1, "valid Service -> Pod evidence must produce exactly 1 result");
+        assert_eq!(
+            res_valid.len(),
+            1,
+            "valid Service -> Pod evidence must produce exactly 1 result"
+        );
         match &res_valid[0] {
             DiscoveryResult::Discovered(discovered) => {
                 assert_eq!(discovered.relationship.kind, RelationshipKind::ROUTES_TO);
-                assert_eq!(discovered.relationship.category, crate::relationship::RelationshipCategory::Network);
+                assert_eq!(
+                    discovered.relationship.category,
+                    crate::relationship::RelationshipCategory::Network
+                );
                 assert_eq!(discovered.relationship.source, valid_svc);
                 assert_eq!(discovered.relationship.target.resource_type.as_str(), "pod");
             }
@@ -3194,8 +3220,14 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         for res in &results {
-            assert!(res.is_conflict(), "Ambiguous endpoint must produce Conflict");
-            assert!(res.discovered().is_none(), "Ambiguous endpoint must NEVER derive CALLS");
+            assert!(
+                res.is_conflict(),
+                "Ambiguous endpoint must produce Conflict"
+            );
+            assert!(
+                res.discovered().is_none(),
+                "Ambiguous endpoint must NEVER derive CALLS"
+            );
         }
     }
 }
