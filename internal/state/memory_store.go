@@ -2,9 +2,11 @@ package state
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MemoryStore provides a thread-safe in-memory implementation of Store.
@@ -17,6 +19,8 @@ type MemoryStore struct {
 	relToEvidence map[string]map[string][]string
 	evToRel       map[string]map[string][]RelationshipKey
 	conflicts     map[string][]DiscoveryConflict
+	authorities   map[string]map[string]WorkspaceAuthority
+	staleAudits   map[string][]StaleRunAudit
 }
 
 // NewMemoryStore initializes an empty MemoryStore.
@@ -28,6 +32,8 @@ func NewMemoryStore() *MemoryStore {
 		relToEvidence: make(map[string]map[string][]string),
 		evToRel:       make(map[string]map[string][]RelationshipKey),
 		conflicts:     make(map[string][]DiscoveryConflict),
+		authorities:   make(map[string]map[string]WorkspaceAuthority),
+		staleAudits:   make(map[string][]StaleRunAudit),
 	}
 }
 
@@ -427,4 +433,286 @@ func (s *MemoryStore) ListWorkspaces(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(workspaces)
 	return workspaces, nil
+}
+
+func (s *MemoryStore) GetWorkspaceAuthority(ctx context.Context, workspaceID string, clusterID string) (*WorkspaceAuthority, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	cid := strings.TrimSpace(clusterID)
+	if cid == "" {
+		cid = "default"
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cMap, ok := s.authorities[ws]
+	if !ok {
+		return nil, ErrAuthorityNotFound
+	}
+	auth, ok := cMap[cid]
+	if !ok {
+		return nil, ErrAuthorityNotFound
+	}
+	return &auth, nil
+}
+
+func (s *MemoryStore) RecordStaleRunAudit(ctx context.Context, audit StaleRunAudit) error {
+	ws := strings.TrimSpace(audit.WorkspaceID)
+	if ws == "" {
+		return ErrInvalidWorkspace
+	}
+	cid := strings.TrimSpace(audit.ClusterID)
+	if cid == "" {
+		cid = "default"
+	}
+	audit.WorkspaceID = ws
+	audit.ClusterID = cid
+	if audit.Status == "" {
+		audit.Status = "STALE_IGNORED"
+	}
+	if audit.ObservedAt.IsZero() {
+		audit.ObservedAt = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	audit.ID = int64(len(s.staleAudits[ws]) + 1)
+	s.staleAudits[ws] = append(s.staleAudits[ws], audit)
+	return nil
+}
+
+func (s *MemoryStore) ListStaleRunAudits(ctx context.Context, workspaceID string) ([]StaleRunAudit, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	audits := s.staleAudits[ws]
+	if audits == nil {
+		return []StaleRunAudit{}, nil
+	}
+	res := make([]StaleRunAudit, len(audits))
+	copy(res, audits)
+	return res, nil
+}
+
+func (s *MemoryStore) ReconcileAuthoritativeBatch(ctx context.Context, params AuthoritativeBatchParams) (*AuthoritativeBatchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ws := strings.TrimSpace(params.WorkspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	clusterID := strings.TrimSpace(params.ClusterID)
+	if clusterID == "" {
+		clusterID = "default"
+	}
+	samplingAt := params.SamplingStartedAt.UTC()
+	if samplingAt.IsZero() {
+		samplingAt = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 1. Race-safe authority initialization
+	cMap, ok := s.authorities[ws]
+	if !ok {
+		cMap = make(map[string]WorkspaceAuthority)
+		s.authorities[ws] = cMap
+	}
+	currentAuth, hasAuth := cMap[clusterID]
+	if !hasAuth {
+		currentAuth = WorkspaceAuthority{
+			WorkspaceID:                     ws,
+			ClusterID:                       clusterID,
+			AuthoritativeRunID:              "",
+			AuthoritativeSamplingStartedAt: time.Unix(0, 0).UTC(),
+			LastGeneration:                  0,
+			UpdatedAt:                       time.Now().UTC(),
+		}
+	}
+
+	currGen := currentAuth.LastGeneration
+	currSampling := currentAuth.AuthoritativeSamplingStartedAt.UTC()
+
+	result := &AuthoritativeBatchResult{
+		CurrentSamplingAt: currSampling,
+		CurrentGeneration: currGen,
+	}
+
+	candidateGen := params.Generation
+
+	// 2. Stale run authority evaluation
+	if currGen > 0 {
+		var isStale bool
+		var staleReason string
+
+		if samplingAt.Before(currSampling) {
+			isStale = true
+			staleReason = fmt.Sprintf("sampling timestamp %s is older than authoritative %s",
+				samplingAt.Format(time.RFC3339Nano), currSampling.Format(time.RFC3339Nano))
+		} else if samplingAt.Equal(currSampling) {
+			if candidateGen <= currGen {
+				isStale = true
+				staleReason = fmt.Sprintf("equal sampling timestamp %s without strictly higher generation (%d <= %d)",
+					samplingAt.Format(time.RFC3339Nano), candidateGen, currGen)
+			}
+		}
+
+		if isStale {
+			result.Stale = true
+			result.AssignedGeneration = currGen
+			auditEntry := StaleRunAudit{
+				ID:                int64(len(s.staleAudits[ws]) + 1),
+				WorkspaceID:       ws,
+				ClusterID:         clusterID,
+				RunID:             params.RunID,
+				SamplingStartedAt: samplingAt,
+				Generation:        candidateGen,
+				Status:            "STALE_IGNORED",
+				Reason:            staleReason,
+				ObservedAt:        time.Now().UTC(),
+			}
+			s.staleAudits[ws] = append(s.staleAudits[ws], auditEntry)
+			return result, fmt.Errorf("%w: %s", ErrStaleCollectionRunIgnored, staleReason)
+		}
+	}
+
+	// 3. Mutate domain state in memory
+	// Evidence
+	evMap, ok := s.evidence[ws]
+	if !ok {
+		evMap = make(map[string]Evidence)
+		s.evidence[ws] = evMap
+	}
+	for _, ev := range params.Evidence {
+		ev.WorkspaceID = ws
+		if _, exists := evMap[ev.ID]; !exists {
+			evMap[ev.ID] = ev
+		}
+	}
+
+	// Resources
+	resMap, ok := s.resources[ws]
+	if !ok {
+		resMap = make(map[string]Resource)
+		s.resources[ws] = resMap
+	}
+	seenRes := make(map[string]bool)
+	for _, r := range params.Resources {
+		r.WorkspaceID = ws
+		key := r.Identity.String()
+		if !seenRes[key] {
+			seenRes[key] = true
+			existing, found := resMap[key]
+			if !found {
+				resMap[key] = r
+				result.ResourcesCreated++
+			} else {
+				result.ResourcesUpdated++
+				if r.LastObservedAt.After(existing.LastObservedAt) {
+					existing.LastObservedAt = r.LastObservedAt
+				}
+				resMap[key] = existing
+			}
+		}
+	}
+
+	// Relationships
+	relMap, ok := s.relationships[ws]
+	if !ok {
+		relMap = make(map[string]Relationship)
+		s.relationships[ws] = relMap
+	}
+	seenRel := make(map[string]bool)
+	for _, rel := range params.Relationships {
+		rel.WorkspaceID = ws
+		key := rel.Key().String()
+		if !seenRel[key] {
+			seenRel[key] = true
+			existing, found := relMap[key]
+			if !found {
+				relMap[key] = rel
+				result.RelationshipsCreated++
+			} else {
+				result.RelationshipsUpdated++
+				if rel.LastObservedAt.After(existing.LastObservedAt) {
+					existing.LastObservedAt = rel.LastObservedAt
+				}
+				relMap[key] = existing
+			}
+		}
+	}
+
+	// Provenance
+	relToEv, ok := s.relToEvidence[ws]
+	if !ok {
+		relToEv = make(map[string][]string)
+		s.relToEvidence[ws] = relToEv
+	}
+	evToR, ok := s.evToRel[ws]
+	if !ok {
+		evToR = make(map[string][]RelationshipKey)
+		s.evToRel[ws] = evToR
+	}
+	for _, assoc := range params.Provenance {
+		relKey := assoc.Relationship.String()
+		existingEvs := relToEv[relKey]
+		found := false
+		for _, id := range existingEvs {
+			if id == assoc.EvidenceID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			relToEv[relKey] = append(relToEv[relKey], assoc.EvidenceID)
+		}
+
+		existingRels := evToR[assoc.EvidenceID]
+		foundRel := false
+		for _, k := range existingRels {
+			if k == assoc.Relationship {
+				foundRel = true
+				break
+			}
+		}
+		if !foundRel {
+			evToR[assoc.EvidenceID] = append(evToR[assoc.EvidenceID], assoc.Relationship)
+		}
+	}
+	result.ProvenanceLinksAdded = len(params.Provenance)
+
+	// Conflicts
+	for _, conf := range params.Conflicts {
+		conf.WorkspaceID = ws
+		s.conflicts[ws] = append(s.conflicts[ws], conf)
+	}
+
+	// 4. Advance authority
+	newGen := currGen + 1
+	if candidateGen > newGen {
+		newGen = candidateGen
+	}
+	result.AssignedGeneration = newGen
+
+	cMap[clusterID] = WorkspaceAuthority{
+		WorkspaceID:                     ws,
+		ClusterID:                       clusterID,
+		AuthoritativeRunID:              params.RunID,
+		AuthoritativeSamplingStartedAt: samplingAt,
+		LastGeneration:                  newGen,
+		UpdatedAt:                       time.Now().UTC(),
+	}
+
+	return result, nil
 }

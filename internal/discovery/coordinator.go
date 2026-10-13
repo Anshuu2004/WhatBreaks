@@ -321,8 +321,11 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 
 	// 7. Stage: Reconciliation & Materialization
 	batch := state.ObservationBatch{
-		WorkspaceID: wsID,
-		Evidence:    colResult.Evidence,
+		WorkspaceID:       wsID,
+		ClusterID:         targetCluster,
+		RunID:             runID,
+		SamplingStartedAt: start,
+		Evidence:          colResult.Evidence,
 		Scope: &state.ScopeBoundary{
 			Provider:  "kubernetes",
 			ScopeType: "cluster",

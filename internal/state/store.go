@@ -14,6 +14,12 @@ var (
 
 	// ErrInvalidWorkspace is returned when workspace ID is missing or invalid.
 	ErrInvalidWorkspace = errors.New("state store: workspace_id cannot be empty")
+
+	// ErrStaleCollectionRunIgnored is returned when a collection run is older than the authoritative state.
+	ErrStaleCollectionRunIgnored = errors.New("state store: collection run is stale and was rejected")
+
+	// ErrAuthorityNotFound is returned when no authority record exists for a workspace and cluster.
+	ErrAuthorityNotFound = errors.New("state store: authority not found")
 )
 
 // Store defines the persistent storage contract for universal WhatBreaks state.
@@ -63,4 +69,17 @@ type Store interface {
 
 	// DeleteWorkspaceState clears all stored state for a workspace.
 	DeleteWorkspaceState(ctx context.Context, workspaceID string) error
+
+	// ReconcileAuthoritativeBatch atomically evaluates run authority under lock, rejects stale runs,
+	// persists all authoritative domain entities within a single transaction, and advances authority.
+	ReconcileAuthoritativeBatch(ctx context.Context, params AuthoritativeBatchParams) (*AuthoritativeBatchResult, error)
+
+	// GetWorkspaceAuthority returns the current authority state for (workspace_id, cluster_id).
+	GetWorkspaceAuthority(ctx context.Context, workspaceID string, clusterID string) (*WorkspaceAuthority, error)
+
+	// RecordStaleRunAudit persists an audit trail entry for a rejected collection run.
+	RecordStaleRunAudit(ctx context.Context, audit StaleRunAudit) error
+
+	// ListStaleRunAudits returns all stale run audit records for a workspace.
+	ListStaleRunAudits(ctx context.Context, workspaceID string) ([]StaleRunAudit, error)
 }

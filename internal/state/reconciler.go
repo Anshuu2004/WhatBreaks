@@ -43,6 +43,8 @@ type ReconciliationResult struct {
 	InsufficientCount    int           `json:"insufficient_count"`
 	InvalidCount         int           `json:"invalid_count"`
 	Duration             time.Duration `json:"duration"`
+	Stale                bool          `json:"stale,omitempty"`
+	Generation           int64         `json:"generation,omitempty"`
 }
 
 // DefaultReconciler coordinates observation ingestion, resource lifecycle tracking,
@@ -126,7 +128,11 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		return result, nil
 	}
 
-	// 1. Validate & Transform Evidence + Extract Subject Resources
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// 1. Validate & Transform Evidence + Extract Subject Resources (In-Memory)
 	domainEvidence := make([]Evidence, 0, len(batch.Evidence))
 	incomingSubjectResources := make(map[string]struct {
 		identity ResourceIdentity
@@ -183,64 +189,15 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		}
 	}
 
-	// 2. Persist Evidence Records Immutably
-	// Historical evidence is strictly immutable. If an evidence ID already exists,
-	// it is preserved without modification (idempotent).
-	if err := r.store.SaveEvidence(ctx, ws, domainEvidence); err != nil {
-		r.logger.Error("Failed to persist immutable evidence observations",
-			"workspace_id", ws,
-			"evidence_count", len(domainEvidence),
-			"error", err.Error(),
-		)
-		return nil, fmt.Errorf("failed to save evidence: %w", err)
-	}
+	// 2. DISCOVERY EXECUTION (In-Memory Pre-computation before ANY database transaction)
+	// Objective 1: Discovery must finish before authoritative database writes begin.
+	// Objective 8: Failed or cancelled discovery must not advance authority or modify authoritative state.
+	var discoveredRels []Relationship
+	var provenanceAssocs []ProvenanceAssociation
+	var conflictsToSave []DiscoveryConflict
+	endpointResourcesMap := make(map[string]ResourceIdentity)
+	now := time.Now().UTC()
 
-	// 3. Reconcile Subject Resources
-	// Distinguish newly discovered resources from previously observed resources
-	var resourcesToSave []Resource
-	for _, inc := range incomingSubjectResources {
-		existing, err := r.store.GetResource(ctx, ws, inc.identity)
-		if err != nil {
-			if errors.Is(err, ErrResourceNotFound) {
-				// Newly observed resource: FirstObservedAt = LastObservedAt = inc.time
-				result.ResourcesCreated++
-				resourcesToSave = append(resourcesToSave, Resource{
-					WorkspaceID:     ws,
-					Identity:        inc.identity,
-					FirstObservedAt: inc.time,
-					LastObservedAt:  inc.time,
-				})
-			} else {
-				return nil, fmt.Errorf("failed to inspect resource %s: %w", inc.identity, err)
-			}
-		} else {
-			// Previously observed resource: preserve FirstObservedAt, update LastObservedAt
-			result.ResourcesUpdated++
-			lastObs := existing.LastObservedAt
-			if inc.time.After(lastObs) {
-				lastObs = inc.time
-			}
-			resourcesToSave = append(resourcesToSave, Resource{
-				WorkspaceID:     ws,
-				Identity:        existing.Identity,
-				FirstObservedAt: existing.FirstObservedAt,
-				LastObservedAt:  lastObs,
-			})
-		}
-	}
-
-	if len(resourcesToSave) > 0 {
-		if err := r.store.SaveResources(ctx, ws, resourcesToSave); err != nil {
-			r.logger.Error("Failed to persist reconciled subject resources",
-				"workspace_id", ws,
-				"resource_count", len(resourcesToSave),
-				"error", err.Error(),
-			)
-			return nil, fmt.Errorf("failed to save resources: %w", err)
-		}
-	}
-
-	// 4. Discovery Execution & Relationship Reconciliation
 	if r.discovery != nil {
 		discReq := &corev1.RunDiscoveryRequest{Evidence: batch.Evidence}
 		discResp, err := r.discovery.RunDiscovery(ctx, discReq)
@@ -252,11 +209,6 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 			)
 			return nil, fmt.Errorf("discovery execution failed: %w", err)
 		}
-
-		now := time.Now().UTC()
-		var discoveredRels []Relationship
-		var provenanceAssocs []ProvenanceAssociation
-		endpointResourcesMap := make(map[string]ResourceIdentity)
 
 		for _, res := range discResp.Results {
 			if res == nil {
@@ -286,39 +238,15 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 
 				relKey := RelationshipKey{Source: src, Target: tgt, Kind: relProto.Kind}
 
-				// Check existing relationship in store to distinguish created vs updated
-				existingRel, err := r.store.GetRelationship(ctx, ws, relKey)
-				if err != nil {
-					if errors.Is(err, ErrRelationshipNotFound) {
-						result.RelationshipsCreated++
-						discoveredRels = append(discoveredRels, Relationship{
-							WorkspaceID:     ws,
-							Source:          src,
-							Target:          tgt,
-							Kind:            relProto.Kind,
-							Category:        relProto.Category,
-							FirstObservedAt: now,
-							LastObservedAt:  now,
-						})
-					} else {
-						return nil, fmt.Errorf("failed to inspect relationship %s: %w", relKey, err)
-					}
-				} else {
-					result.RelationshipsUpdated++
-					lastObs := existingRel.LastObservedAt
-					if now.After(lastObs) {
-						lastObs = now
-					}
-					discoveredRels = append(discoveredRels, Relationship{
-						WorkspaceID:     ws,
-						Source:          src,
-						Target:          tgt,
-						Kind:            relProto.Kind,
-						Category:        relProto.Category,
-						FirstObservedAt: existingRel.FirstObservedAt,
-						LastObservedAt:  lastObs,
-					})
-				}
+				discoveredRels = append(discoveredRels, Relationship{
+					WorkspaceID:     ws,
+					Source:          src,
+					Target:          tgt,
+					Kind:            relProto.Kind,
+					Category:        relProto.Category,
+					FirstObservedAt: now,
+					LastObservedAt:  now,
+				})
 
 				for _, evID := range disc.SupportingEvidenceIds {
 					provenanceAssocs = append(provenanceAssocs, ProvenanceAssociation{
@@ -326,7 +254,6 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 						Relationship: relKey,
 						EvidenceID:   evID,
 					})
-					result.ProvenanceLinksAdded++
 				}
 
 			} else if conf := res.GetConflict(); conf != nil {
@@ -335,7 +262,7 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 					"workspace_id", ws,
 					"description", conf.Description,
 				)
-				_ = r.store.SaveConflict(ctx, DiscoveryConflict{
+				conflictsToSave = append(conflictsToSave, DiscoveryConflict{
 					WorkspaceID: ws,
 					Description: conf.Description,
 					ObservedAt:  now,
@@ -355,71 +282,94 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 				)
 			}
 		}
+	}
 
-		// Reconcile relationship endpoint resources
-		var endpointsToSave []Resource
-		for _, epID := range endpointResourcesMap {
-			existing, err := r.store.GetResource(ctx, ws, epID)
-			if err != nil {
-				if errors.Is(err, ErrResourceNotFound) {
-					result.ResourcesCreated++
-					endpointsToSave = append(endpointsToSave, Resource{
-						WorkspaceID:     ws,
-						Identity:        epID,
-						FirstObservedAt: now,
-						LastObservedAt:  now,
-					})
-				}
-			} else {
-				// If not already updated in incoming subject resources, update LastObservedAt
-				if _, ok := incomingSubjectResources[epID.String()]; !ok {
-					result.ResourcesUpdated++
-					lastObs := existing.LastObservedAt
-					if now.After(lastObs) {
-						lastObs = now
-					}
-					endpointsToSave = append(endpointsToSave, Resource{
-						WorkspaceID:     ws,
-						Identity:        existing.Identity,
-						FirstObservedAt: existing.FirstObservedAt,
-						LastObservedAt:  lastObs,
-					})
-				}
-			}
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-		if len(endpointsToSave) > 0 {
-			if err := r.store.SaveResources(ctx, ws, endpointsToSave); err != nil {
-				r.logger.Error("Failed to persist relationship endpoints",
-					"workspace_id", ws,
-					"error", err.Error(),
-				)
-				return nil, fmt.Errorf("failed to save endpoint resources: %w", err)
-			}
-		}
-
-		if len(discoveredRels) > 0 {
-			if err := r.store.SaveRelationships(ctx, ws, discoveredRels); err != nil {
-				r.logger.Error("Failed to persist reconciled relationships",
-					"workspace_id", ws,
-					"error", err.Error(),
-				)
-				return nil, fmt.Errorf("failed to save relationships: %w", err)
-			}
-		}
-
-		if len(provenanceAssocs) > 0 {
-			if err := r.store.SaveProvenance(ctx, ws, provenanceAssocs); err != nil {
-				r.logger.Error("Failed to persist provenance associations",
-					"workspace_id", ws,
-					"error", err.Error(),
-				)
-				return nil, fmt.Errorf("failed to save provenance: %w", err)
-			}
+	// 3. Assemble all resources to persist in memory (subjects + endpoints)
+	var resourcesToSave []Resource
+	for _, inc := range incomingSubjectResources {
+		resourcesToSave = append(resourcesToSave, Resource{
+			WorkspaceID:     ws,
+			Identity:        inc.identity,
+			FirstObservedAt: inc.time,
+			LastObservedAt:  inc.time,
+		})
+	}
+	for _, epID := range endpointResourcesMap {
+		if _, exists := incomingSubjectResources[epID.String()]; !exists {
+			resourcesToSave = append(resourcesToSave, Resource{
+				WorkspaceID:     ws,
+				Identity:        epID,
+				FirstObservedAt: now,
+				LastObservedAt:  now,
+			})
 		}
 	}
 
-	// 5. Query totals for telemetry
+	// 4. Resolve collection run coordinates
+	clusterID := batch.ClusterID
+	if clusterID == "" && batch.Scope != nil && batch.Scope.ScopeID != "" {
+		clusterID = batch.Scope.ScopeID
+	}
+	if clusterID == "" {
+		clusterID = "default"
+	}
+
+	runID := batch.RunID
+	if runID == "" {
+		runID = fmt.Sprintf("run-%d", time.Now().UnixNano())
+	}
+
+	samplingStartedAt := batch.SamplingStartedAt
+	if samplingStartedAt.IsZero() {
+		samplingStartedAt = start
+	}
+
+	// 5. ATOMIC AUTHORITATIVE RECONCILIATION IN A SINGLE TRANSACTION
+	// Objectives 2, 3, 4, 5, 6, 7, 9, 10
+	batchParams := AuthoritativeBatchParams{
+		WorkspaceID:       ws,
+		ClusterID:         clusterID,
+		RunID:             runID,
+		SamplingStartedAt: samplingStartedAt,
+		Generation:        batch.Generation,
+		Evidence:          domainEvidence,
+		Resources:         resourcesToSave,
+		Relationships:     discoveredRels,
+		Provenance:        provenanceAssocs,
+		Conflicts:         conflictsToSave,
+	}
+
+	batchRes, err := r.store.ReconcileAuthoritativeBatch(ctx, batchParams)
+	if err != nil {
+		if errors.Is(err, ErrStaleCollectionRunIgnored) {
+			result.Stale = true
+			if batchRes != nil {
+				result.Generation = batchRes.AssignedGeneration
+			}
+			r.logger.Warn("Reconciliation rejected: stale collection run",
+				"workspace_id", ws,
+				"cluster_id", clusterID,
+				"run_id", runID,
+				"sampling_started_at", samplingStartedAt,
+				"error", err.Error(),
+			)
+			return result, err
+		}
+		return nil, err
+	}
+
+	result.ResourcesCreated = batchRes.ResourcesCreated
+	result.ResourcesUpdated = batchRes.ResourcesUpdated
+	result.RelationshipsCreated = batchRes.RelationshipsCreated
+	result.RelationshipsUpdated = batchRes.RelationshipsUpdated
+	result.ProvenanceLinksAdded = batchRes.ProvenanceLinksAdded
+	result.Generation = batchRes.AssignedGeneration
+
+	// 6. Query totals for telemetry
 	if totalRes, err := r.store.ListResources(ctx, ws); err == nil {
 		result.ResourcesTotal = len(totalRes)
 	}
@@ -430,6 +380,9 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 	result.Duration = time.Since(start)
 	r.logger.Info("Reconciliation completed successfully",
 		"workspace_id", ws,
+		"cluster_id", clusterID,
+		"run_id", runID,
+		"generation", result.Generation,
 		"evidence_count", result.EvidenceCount,
 		"resources_created", result.ResourcesCreated,
 		"resources_updated", result.ResourcesUpdated,
@@ -447,7 +400,10 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 func (r *DefaultReconciler) ReconcileAndMaterialize(ctx context.Context, batch ObservationBatch) (*ReconciliationResult, error) {
 	res, err := r.Reconcile(ctx, batch)
 	if err != nil {
-		return nil, err
+		return res, err
+	}
+	if res != nil && res.Stale {
+		return res, ErrStaleCollectionRunIgnored
 	}
 
 	if r.materializer != nil {

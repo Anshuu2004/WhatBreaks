@@ -2,9 +2,11 @@ package state
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/database"
 )
@@ -80,9 +82,190 @@ func EnsureSchema(ctx context.Context, db database.DB) error {
 		description TEXT NOT NULL,
 		observed_at TIMESTAMPTZ NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS state_workspace_authority (
+		workspace_id TEXT NOT NULL,
+		cluster_id TEXT NOT NULL,
+		authoritative_run_id TEXT NOT NULL,
+		authoritative_sampling_started_at TIMESTAMPTZ NOT NULL,
+		last_generation BIGINT NOT NULL DEFAULT 0,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (workspace_id, cluster_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS state_reconciliation_audit (
+		id BIGSERIAL PRIMARY KEY,
+		workspace_id TEXT NOT NULL,
+		cluster_id TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		sampling_started_at TIMESTAMPTZ NOT NULL,
+		generation BIGINT NOT NULL,
+		status TEXT NOT NULL,
+		reason TEXT NOT NULL,
+		observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
 	`
 	_, err := db.Exec(ctx, schema)
 	return err
+}
+
+type staleRunError struct {
+	reason string
+	gen    int64
+}
+
+func (e *staleRunError) Error() string {
+	return e.reason
+}
+
+func saveResourcesTx(ctx context.Context, tx database.Tx, ws string, resources []Resource) (int, int, error) {
+	if len(resources) == 0 {
+		return 0, 0, nil
+	}
+
+	query := `
+	INSERT INTO state_resources (workspace_id, provider, resource_type, provider_id, first_observed_at, last_observed_at)
+	VALUES ($1, $2, $3, $4, $5, $6)
+	ON CONFLICT (workspace_id, provider, resource_type, provider_id)
+	DO UPDATE SET last_observed_at = GREATEST(state_resources.last_observed_at, EXCLUDED.last_observed_at);
+	`
+
+	existingRows, err := tx.Query(ctx, `SELECT provider, resource_type, provider_id FROM state_resources WHERE workspace_id = $1`, ws)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to query existing resources: %w", err)
+	}
+	defer existingRows.Close()
+
+	existing := make(map[string]bool)
+	for existingRows.Next() {
+		var p, rt, pid string
+		if err := existingRows.Scan(&p, &rt, &pid); err == nil {
+			existing[fmt.Sprintf("%s:%s:%s", p, rt, pid)] = true
+		}
+	}
+
+	var created, updated int
+	seen := make(map[string]bool)
+	for _, r := range resources {
+		k := r.Identity.String()
+		if !seen[k] {
+			seen[k] = true
+			if existing[k] {
+				updated++
+			} else {
+				created++
+			}
+		}
+		_, err := tx.Exec(ctx, query, ws, r.Identity.Provider, r.Identity.ResourceType, r.Identity.ProviderID, r.FirstObservedAt, r.LastObservedAt)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to save resource %s: %w", r.Identity, err)
+		}
+	}
+	return created, updated, nil
+}
+
+func saveEvidenceTx(ctx context.Context, tx database.Tx, ws string, evidence []Evidence) error {
+	if len(evidence) == 0 {
+		return nil
+	}
+	query := `
+	INSERT INTO state_evidence (workspace_id, id, source_provider, source_collector, observed_at, observation_type, subject_provider, subject_resource_type, subject_provider_id, data)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	ON CONFLICT (workspace_id, id) DO NOTHING;
+	`
+	for _, ev := range evidence {
+		_, err := tx.Exec(ctx, query, ws, ev.ID, ev.Source.Provider, ev.Source.Collector, ev.ObservedAt, ev.ObservationType, ev.Subject.Provider, ev.Subject.ResourceType, ev.Subject.ProviderID, ev.Data)
+		if err != nil {
+			return fmt.Errorf("failed to save evidence %s: %w", ev.ID, err)
+		}
+	}
+	return nil
+}
+
+func saveRelationshipsTx(ctx context.Context, tx database.Tx, ws string, relationships []Relationship) (int, int, error) {
+	if len(relationships) == 0 {
+		return 0, 0, nil
+	}
+
+	query := `
+	INSERT INTO state_relationships (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind, category, first_observed_at, last_observed_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	ON CONFLICT (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind)
+	DO UPDATE SET last_observed_at = GREATEST(state_relationships.last_observed_at, EXCLUDED.last_observed_at);
+	`
+
+	existingRows, err := tx.Query(ctx, `SELECT source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind FROM state_relationships WHERE workspace_id = $1`, ws)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to query existing relationships: %w", err)
+	}
+	defer existingRows.Close()
+
+	existing := make(map[string]bool)
+	for existingRows.Next() {
+		var sp, srt, spid, tp, trt, tpid, k string
+		if err := existingRows.Scan(&sp, &srt, &spid, &tp, &trt, &tpid, &k); err == nil {
+			existing[fmt.Sprintf("%s:%s:%s-%s->%s:%s:%s", sp, srt, spid, k, tp, trt, tpid)] = true
+		}
+	}
+
+	var created, updated int
+	seen := make(map[string]bool)
+	for _, rel := range relationships {
+		relKey := fmt.Sprintf("%s:%s:%s-%s->%s:%s:%s",
+			rel.Source.Provider, rel.Source.ResourceType, rel.Source.ProviderID, rel.Kind,
+			rel.Target.Provider, rel.Target.ResourceType, rel.Target.ProviderID)
+		if !seen[relKey] {
+			seen[relKey] = true
+			if existing[relKey] {
+				updated++
+			} else {
+				created++
+			}
+		}
+		_, err := tx.Exec(ctx, query, ws,
+			rel.Source.Provider, rel.Source.ResourceType, rel.Source.ProviderID,
+			rel.Target.Provider, rel.Target.ResourceType, rel.Target.ProviderID,
+			rel.Kind, rel.Category, rel.FirstObservedAt, rel.LastObservedAt)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to save relationship %s: %w", rel.Key(), err)
+		}
+	}
+	return created, updated, nil
+}
+
+func saveProvenanceTx(ctx context.Context, tx database.Tx, ws string, associations []ProvenanceAssociation) error {
+	if len(associations) == 0 {
+		return nil
+	}
+	query := `
+	INSERT INTO state_provenance (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind, evidence_id)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	ON CONFLICT (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind, evidence_id) DO NOTHING;
+	`
+	for _, assoc := range associations {
+		_, err := tx.Exec(ctx, query, ws,
+			assoc.Relationship.Source.Provider, assoc.Relationship.Source.ResourceType, assoc.Relationship.Source.ProviderID,
+			assoc.Relationship.Target.Provider, assoc.Relationship.Target.ResourceType, assoc.Relationship.Target.ProviderID,
+			assoc.Relationship.Kind, assoc.EvidenceID)
+		if err != nil {
+			return fmt.Errorf("failed to save provenance association: %w", err)
+		}
+	}
+	return nil
+}
+
+func saveConflictsTx(ctx context.Context, tx database.Tx, ws string, conflicts []DiscoveryConflict) error {
+	if len(conflicts) == 0 {
+		return nil
+	}
+	query := `INSERT INTO state_conflicts (workspace_id, description, observed_at) VALUES ($1, $2, $3)`
+	for _, conf := range conflicts {
+		_, err := tx.Exec(ctx, query, ws, conf.Description, conf.ObservedAt)
+		if err != nil {
+			return fmt.Errorf("failed to save conflict: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *PostgresStore) SaveResources(ctx context.Context, workspaceID string, resources []Resource) error {
@@ -95,19 +278,8 @@ func (s *PostgresStore) SaveResources(ctx context.Context, workspaceID string, r
 	}
 
 	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		query := `
-		INSERT INTO state_resources (workspace_id, provider, resource_type, provider_id, first_observed_at, last_observed_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (workspace_id, provider, resource_type, provider_id)
-		DO UPDATE SET last_observed_at = GREATEST(state_resources.last_observed_at, EXCLUDED.last_observed_at);
-		`
-		for _, r := range resources {
-			_, err := tx.Exec(ctx, query, ws, r.Identity.Provider, r.Identity.ResourceType, r.Identity.ProviderID, r.FirstObservedAt, r.LastObservedAt)
-			if err != nil {
-				return fmt.Errorf("failed to save resource %s: %w", r.Identity, err)
-			}
-		}
-		return nil
+		_, _, err := saveResourcesTx(ctx, tx, ws, resources)
+		return err
 	})
 }
 
@@ -121,18 +293,7 @@ func (s *PostgresStore) SaveEvidence(ctx context.Context, workspaceID string, ev
 	}
 
 	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		query := `
-		INSERT INTO state_evidence (workspace_id, id, source_provider, source_collector, observed_at, observation_type, subject_provider, subject_resource_type, subject_provider_id, data)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (workspace_id, id) DO NOTHING;
-		`
-		for _, ev := range evidence {
-			_, err := tx.Exec(ctx, query, ws, ev.ID, ev.Source.Provider, ev.Source.Collector, ev.ObservedAt, ev.ObservationType, ev.Subject.Provider, ev.Subject.ResourceType, ev.Subject.ProviderID, ev.Data)
-			if err != nil {
-				return fmt.Errorf("failed to save evidence %s: %w", ev.ID, err)
-			}
-		}
-		return nil
+		return saveEvidenceTx(ctx, tx, ws, evidence)
 	})
 }
 
@@ -146,22 +307,8 @@ func (s *PostgresStore) SaveRelationships(ctx context.Context, workspaceID strin
 	}
 
 	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		query := `
-		INSERT INTO state_relationships (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind, category, first_observed_at, last_observed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind)
-		DO UPDATE SET last_observed_at = GREATEST(state_relationships.last_observed_at, EXCLUDED.last_observed_at);
-		`
-		for _, rel := range relationships {
-			_, err := tx.Exec(ctx, query, ws,
-				rel.Source.Provider, rel.Source.ResourceType, rel.Source.ProviderID,
-				rel.Target.Provider, rel.Target.ResourceType, rel.Target.ProviderID,
-				rel.Kind, rel.Category, rel.FirstObservedAt, rel.LastObservedAt)
-			if err != nil {
-				return fmt.Errorf("failed to save relationship %s: %w", rel.Key(), err)
-			}
-		}
-		return nil
+		_, _, err := saveRelationshipsTx(ctx, tx, ws, relationships)
+		return err
 	})
 }
 
@@ -175,21 +322,7 @@ func (s *PostgresStore) SaveProvenance(ctx context.Context, workspaceID string, 
 	}
 
 	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		query := `
-		INSERT INTO state_provenance (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind, evidence_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (workspace_id, source_provider, source_resource_type, source_provider_id, target_provider, target_resource_type, target_provider_id, kind, evidence_id) DO NOTHING;
-		`
-		for _, assoc := range associations {
-			_, err := tx.Exec(ctx, query, ws,
-				assoc.Relationship.Source.Provider, assoc.Relationship.Source.ResourceType, assoc.Relationship.Source.ProviderID,
-				assoc.Relationship.Target.Provider, assoc.Relationship.Target.ResourceType, assoc.Relationship.Target.ProviderID,
-				assoc.Relationship.Kind, assoc.EvidenceID)
-			if err != nil {
-				return fmt.Errorf("failed to save provenance association: %w", err)
-			}
-		}
-		return nil
+		return saveProvenanceTx(ctx, tx, ws, associations)
 	})
 }
 
@@ -201,6 +334,230 @@ func (s *PostgresStore) SaveConflict(ctx context.Context, conflict DiscoveryConf
 	query := `INSERT INTO state_conflicts (workspace_id, description, observed_at) VALUES ($1, $2, $3)`
 	_, err := s.db.Exec(ctx, query, ws, conflict.Description, conflict.ObservedAt)
 	return err
+}
+
+func (s *PostgresStore) RecordStaleRunAudit(ctx context.Context, audit StaleRunAudit) error {
+	ws := strings.TrimSpace(audit.WorkspaceID)
+	if ws == "" {
+		return ErrInvalidWorkspace
+	}
+	clusterID := strings.TrimSpace(audit.ClusterID)
+	if clusterID == "" {
+		clusterID = "default"
+	}
+	status := strings.TrimSpace(audit.Status)
+	if status == "" {
+		status = "STALE_IGNORED"
+	}
+	query := `
+	INSERT INTO state_reconciliation_audit (workspace_id, cluster_id, run_id, sampling_started_at, generation, status, reason, observed_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+	`
+	observedAt := audit.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(ctx, query, ws, clusterID, audit.RunID, audit.SamplingStartedAt, audit.Generation, status, audit.Reason, observedAt)
+	return err
+}
+
+func (s *PostgresStore) ListStaleRunAudits(ctx context.Context, workspaceID string) ([]StaleRunAudit, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	query := `
+	SELECT id, workspace_id, cluster_id, run_id, sampling_started_at, generation, status, reason, observed_at
+	FROM state_reconciliation_audit
+	WHERE workspace_id = $1
+	ORDER BY id ASC;
+	`
+	rows, err := s.db.Query(ctx, query, ws)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list stale run audits: %w", err)
+	}
+	defer rows.Close()
+
+	var audits []StaleRunAudit
+	for rows.Next() {
+		var a StaleRunAudit
+		if err := rows.Scan(&a.ID, &a.WorkspaceID, &a.ClusterID, &a.RunID, &a.SamplingStartedAt, &a.Generation, &a.Status, &a.Reason, &a.ObservedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan stale run audit: %w", err)
+		}
+		audits = append(audits, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading stale run audit rows: %w", err)
+	}
+	if audits == nil {
+		audits = []StaleRunAudit{}
+	}
+	return audits, nil
+}
+
+func (s *PostgresStore) GetWorkspaceAuthority(ctx context.Context, workspaceID string, clusterID string) (*WorkspaceAuthority, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	cid := strings.TrimSpace(clusterID)
+	if cid == "" {
+		cid = "default"
+	}
+	query := `
+	SELECT workspace_id, cluster_id, authoritative_run_id, authoritative_sampling_started_at, last_generation, updated_at
+	FROM state_workspace_authority
+	WHERE workspace_id = $1 AND cluster_id = $2;
+	`
+	var a WorkspaceAuthority
+	err := s.db.QueryRow(ctx, query, ws, cid).Scan(&a.WorkspaceID, &a.ClusterID, &a.AuthoritativeRunID, &a.AuthoritativeSamplingStartedAt, &a.LastGeneration, &a.UpdatedAt)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return nil, ErrAuthorityNotFound
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (s *PostgresStore) ReconcileAuthoritativeBatch(ctx context.Context, params AuthoritativeBatchParams) (*AuthoritativeBatchResult, error) {
+	ws := strings.TrimSpace(params.WorkspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	clusterID := strings.TrimSpace(params.ClusterID)
+	if clusterID == "" {
+		clusterID = "default"
+	}
+	samplingAt := params.SamplingStartedAt.UTC()
+	if samplingAt.IsZero() {
+		samplingAt = time.Now().UTC()
+	}
+
+	result := &AuthoritativeBatchResult{}
+
+	err := s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
+		// 1. Race-safe authority row initialization
+		initSQL := `
+		INSERT INTO state_workspace_authority (
+			workspace_id, cluster_id, authoritative_run_id, authoritative_sampling_started_at, last_generation, updated_at
+		) VALUES ($1, $2, '', '1970-01-01 00:00:00Z', 0, NOW())
+		ON CONFLICT (workspace_id, cluster_id) DO NOTHING;
+		`
+		if _, err := tx.Exec(ctx, initSQL, ws, clusterID); err != nil {
+			return fmt.Errorf("failed to initialize workspace authority: %w", err)
+		}
+
+		// 2. Lock authority row until tx commit/rollback
+		lockSQL := `
+		SELECT authoritative_run_id, authoritative_sampling_started_at, last_generation
+		FROM state_workspace_authority
+		WHERE workspace_id = $1 AND cluster_id = $2
+		FOR UPDATE;
+		`
+		var currRunID string
+		var currSampling time.Time
+		var currGen int64
+		if err := tx.QueryRow(ctx, lockSQL, ws, clusterID).Scan(&currRunID, &currSampling, &currGen); err != nil {
+			return fmt.Errorf("failed to lock workspace authority: %w", err)
+		}
+		currSampling = currSampling.UTC()
+
+		result.CurrentSamplingAt = currSampling
+		result.CurrentGeneration = currGen
+
+		// 3. Stale run authority evaluation
+		candidateGen := params.Generation
+		if currGen > 0 {
+			var isStale bool
+			var staleReason string
+
+			if samplingAt.Before(currSampling) {
+				isStale = true
+				staleReason = fmt.Sprintf("sampling timestamp %s is older than authoritative %s",
+					samplingAt.Format(time.RFC3339Nano), currSampling.Format(time.RFC3339Nano))
+			} else if samplingAt.Equal(currSampling) {
+				if candidateGen <= currGen {
+					isStale = true
+					staleReason = fmt.Sprintf("equal sampling timestamp %s without strictly higher generation (%d <= %d)",
+						samplingAt.Format(time.RFC3339Nano), candidateGen, currGen)
+				}
+			}
+
+			if isStale {
+				result.Stale = true
+				result.AssignedGeneration = currGen
+				return &staleRunError{reason: staleReason, gen: candidateGen}
+			}
+		}
+
+		// 4. Authoritative mutations (Under the SAME single transaction)
+		if err := saveEvidenceTx(ctx, tx, ws, params.Evidence); err != nil {
+			return err
+		}
+		createdRes, updatedRes, err := saveResourcesTx(ctx, tx, ws, params.Resources)
+		if err != nil {
+			return err
+		}
+		result.ResourcesCreated = createdRes
+		result.ResourcesUpdated = updatedRes
+
+		createdRels, updatedRels, err := saveRelationshipsTx(ctx, tx, ws, params.Relationships)
+		if err != nil {
+			return err
+		}
+		result.RelationshipsCreated = createdRels
+		result.RelationshipsUpdated = updatedRels
+
+		if err := saveProvenanceTx(ctx, tx, ws, params.Provenance); err != nil {
+			return err
+		}
+		result.ProvenanceLinksAdded = len(params.Provenance)
+
+		if err := saveConflictsTx(ctx, tx, ws, params.Conflicts); err != nil {
+			return err
+		}
+
+		// 5. Monotonically advance authority generation
+		newGen := currGen + 1
+		if candidateGen > newGen {
+			newGen = candidateGen
+		}
+		result.AssignedGeneration = newGen
+
+		updateAuthSQL := `
+		UPDATE state_workspace_authority
+		SET authoritative_run_id = $1,
+		    authoritative_sampling_started_at = $2,
+		    last_generation = $3,
+		    updated_at = NOW()
+		WHERE workspace_id = $4 AND cluster_id = $5;
+		`
+		if _, err := tx.Exec(ctx, updateAuthSQL, params.RunID, samplingAt, newGen, ws, clusterID); err != nil {
+			return fmt.Errorf("failed to update workspace authority: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		var sErr *staleRunError
+		if errors.As(err, &sErr) {
+			_ = s.RecordStaleRunAudit(ctx, StaleRunAudit{
+				WorkspaceID:       ws,
+				ClusterID:         clusterID,
+				RunID:             params.RunID,
+				SamplingStartedAt: samplingAt,
+				Generation:        sErr.gen,
+				Reason:            sErr.reason,
+				ObservedAt:        time.Now().UTC(),
+			})
+			return result, fmt.Errorf("%w: %s", ErrStaleCollectionRunIgnored, sErr.reason)
+		}
+		return nil, err
+	}
+
+	return result, nil
 }
 
 func (s *PostgresStore) GetResource(ctx context.Context, workspaceID string, identity ResourceIdentity) (*Resource, error) {
@@ -507,7 +864,7 @@ func (s *PostgresStore) DeleteWorkspaceState(ctx context.Context, workspaceID st
 	}
 
 	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		tables := []string{"state_conflicts", "state_provenance", "state_relationships", "state_evidence", "state_resources"}
+		tables := []string{"state_conflicts", "state_provenance", "state_relationships", "state_evidence", "state_resources", "state_reconciliation_audit", "state_workspace_authority"}
 		for _, t := range tables {
 			if _, err := tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE workspace_id = $1", t), ws); err != nil {
 				return err

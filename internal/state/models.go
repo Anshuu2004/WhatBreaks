@@ -112,9 +112,63 @@ type ScopeBoundary struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
+// WorkspaceAuthority represents authoritative collection-run state for a workspace and cluster.
+type WorkspaceAuthority struct {
+	WorkspaceID                 string    `json:"workspace_id"`
+	ClusterID                   string    `json:"cluster_id"`
+	AuthoritativeRunID          string    `json:"authoritative_run_id"`
+	AuthoritativeSamplingStartedAt time.Time `json:"authoritative_sampling_started_at"`
+	LastGeneration              int64     `json:"last_generation"`
+	UpdatedAt                   time.Time `json:"updated_at"`
+}
+
+// StaleRunAudit records rejected collection runs for auditability without mutating authoritative state.
+type StaleRunAudit struct {
+	ID                int64     `json:"id,omitempty"`
+	WorkspaceID       string    `json:"workspace_id"`
+	ClusterID         string    `json:"cluster_id"`
+	RunID             string    `json:"run_id"`
+	SamplingStartedAt time.Time `json:"sampling_started_at"`
+	Generation        int64     `json:"generation"`
+	Status            string    `json:"status"`
+	Reason            string    `json:"reason"`
+	ObservedAt        time.Time `json:"observed_at"`
+}
+
+// AuthoritativeBatchParams packages all entities to be reconciled within a single atomic database transaction.
+type AuthoritativeBatchParams struct {
+	WorkspaceID       string
+	ClusterID         string
+	RunID             string
+	SamplingStartedAt time.Time
+	Generation        int64
+	Evidence          []Evidence
+	Resources         []Resource
+	Relationships     []Relationship
+	Provenance        []ProvenanceAssociation
+	Conflicts         []DiscoveryConflict
+}
+
+// AuthoritativeBatchResult reports the outcome of the authoritative batch transaction.
+type AuthoritativeBatchResult struct {
+	Stale                bool
+	CurrentSamplingAt    time.Time
+	CurrentGeneration    int64
+	AssignedGeneration   int64
+	ResourcesCreated     int
+	ResourcesUpdated     int
+	RelationshipsCreated int
+	RelationshipsUpdated int
+	ProvenanceLinksAdded int
+}
+
 // ObservationBatch packages normalized evidence records for ingestion into a specific workspace.
 type ObservationBatch struct {
-	WorkspaceID string             `json:"workspace_id"`
-	Evidence    []*corev1.Evidence `json:"evidence"`
-	Scope       *ScopeBoundary     `json:"scope,omitempty"`
+	WorkspaceID       string             `json:"workspace_id"`
+	ClusterID         string             `json:"cluster_id,omitempty"`
+	RunID             string             `json:"run_id,omitempty"`
+	SamplingStartedAt time.Time          `json:"sampling_started_at,omitempty"`
+	Generation        int64              `json:"generation,omitempty"`
+	Evidence          []*corev1.Evidence `json:"evidence"`
+	Scope             *ScopeBoundary     `json:"scope,omitempty"`
 }

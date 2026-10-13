@@ -77,6 +77,14 @@ func (h *hookStore) SaveResources(ctx context.Context, workspaceID string, resou
 	return err
 }
 
+func (h *hookStore) ReconcileAuthoritativeBatch(ctx context.Context, params state.AuthoritativeBatchParams) (*state.AuthoritativeBatchResult, error) {
+	res, err := h.Store.ReconcileAuthoritativeBatch(ctx, params)
+	if h.onSaveResources != nil && len(params.Resources) > 0 {
+		h.onSaveResources(ctx, params.WorkspaceID, params.Resources)
+	}
+	return res, err
+}
+
 func TestMaterializer_Materialize_Success(t *testing.T) {
 	ctx := context.Background()
 	store := state.NewMemoryStore()

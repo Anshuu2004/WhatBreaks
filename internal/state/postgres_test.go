@@ -94,6 +94,8 @@ func TestPostgresStore_Integration(t *testing.T) {
 			"state_relationships",
 			"state_provenance",
 			"state_conflicts",
+			"state_workspace_authority",
+			"state_reconciliation_audit",
 		}
 
 		for _, table := range expectedTables {
