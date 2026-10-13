@@ -215,6 +215,20 @@ func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*co
 		})
 	}
 
+	// 4. Convert directly observed resources
+	for _, res := range state.Resources {
+		protoReq.ObservedResources = append(protoReq.ObservedResources, &corev1.ResourceIdentity{
+			Provider:     res.Identity.Provider,
+			ResourceType: res.Identity.ResourceType,
+			ProviderId:   res.Identity.ProviderID,
+		})
+	}
+
+	// 5. Convert active diagnostics
+	for _, diag := range state.Diagnostics {
+		protoReq.Diagnostics = append(protoReq.Diagnostics, diag.ToProto())
+	}
+
 	resp, err := m.client.LoadState(ctx, protoReq)
 	duration := time.Since(start)
 

@@ -198,6 +198,59 @@ func (DiagnosticSeverity) EnumDescriptor() ([]byte, []int) {
 	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{2}
 }
 
+// Relevance of a diagnostic to the requested analysis or graph traversal.
+type DiagnosticRelevance int32
+
+const (
+	DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_UNSPECIFIED  DiagnosticRelevance = 0
+	DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_TARGET       DiagnosticRelevance = 1
+	DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_BLAST_RADIUS DiagnosticRelevance = 2
+	DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_WORKSPACE    DiagnosticRelevance = 3
+)
+
+// Enum value maps for DiagnosticRelevance.
+var (
+	DiagnosticRelevance_name = map[int32]string{
+		0: "DIAGNOSTIC_RELEVANCE_UNSPECIFIED",
+		1: "DIAGNOSTIC_RELEVANCE_TARGET",
+		2: "DIAGNOSTIC_RELEVANCE_BLAST_RADIUS",
+		3: "DIAGNOSTIC_RELEVANCE_WORKSPACE",
+	}
+	DiagnosticRelevance_value = map[string]int32{
+		"DIAGNOSTIC_RELEVANCE_UNSPECIFIED":  0,
+		"DIAGNOSTIC_RELEVANCE_TARGET":       1,
+		"DIAGNOSTIC_RELEVANCE_BLAST_RADIUS": 2,
+		"DIAGNOSTIC_RELEVANCE_WORKSPACE":    3,
+	}
+)
+
+func (x DiagnosticRelevance) Enum() *DiagnosticRelevance {
+	p := new(DiagnosticRelevance)
+	*p = x
+	return p
+}
+
+func (x DiagnosticRelevance) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DiagnosticRelevance) Descriptor() protoreflect.EnumDescriptor {
+	return file_wb_core_v1_core_proto_enumTypes[3].Descriptor()
+}
+
+func (DiagnosticRelevance) Type() protoreflect.EnumType {
+	return &file_wb_core_v1_core_proto_enumTypes[3]
+}
+
+func (x DiagnosticRelevance) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DiagnosticRelevance.Descriptor instead.
+func (DiagnosticRelevance) EnumDescriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{3}
+}
+
 // ---------------------------------------------------------------------------
 // ResourceIdentity
 //
@@ -1615,6 +1668,12 @@ type DiagnosticItem struct {
 	Target                *ResourceIdentity      `protobuf:"bytes,4,opt,name=target,proto3" json:"target,omitempty"`
 	SupportingEvidenceIds []string               `protobuf:"bytes,5,rep,name=supporting_evidence_ids,json=supportingEvidenceIds,proto3" json:"supporting_evidence_ids,omitempty"` // UUIDv4 strings
 	Scope                 string                 `protobuf:"bytes,6,opt,name=scope,proto3" json:"scope,omitempty"`
+	ReferencedResource    *ResourceIdentity      `protobuf:"bytes,7,opt,name=referenced_resource,json=referencedResource,proto3" json:"referenced_resource,omitempty"`
+	UnresolvedEndpoint    string                 `protobuf:"bytes,8,opt,name=unresolved_endpoint,json=unresolvedEndpoint,proto3" json:"unresolved_endpoint,omitempty"`
+	Relevance             DiagnosticRelevance    `protobuf:"varint,9,opt,name=relevance,proto3,enum=wb.core.v1.DiagnosticRelevance" json:"relevance,omitempty"`
+	CompletenessImpact    CompletenessStatus     `protobuf:"varint,10,opt,name=completeness_impact,json=completenessImpact,proto3,enum=wb.core.v1.CompletenessStatus" json:"completeness_impact,omitempty"`
+	FirstObservedAt       string                 `protobuf:"bytes,11,opt,name=first_observed_at,json=firstObservedAt,proto3" json:"first_observed_at,omitempty"`
+	LastObservedAt        string                 `protobuf:"bytes,12,opt,name=last_observed_at,json=lastObservedAt,proto3" json:"last_observed_at,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -1687,6 +1746,48 @@ func (x *DiagnosticItem) GetSupportingEvidenceIds() []string {
 func (x *DiagnosticItem) GetScope() string {
 	if x != nil {
 		return x.Scope
+	}
+	return ""
+}
+
+func (x *DiagnosticItem) GetReferencedResource() *ResourceIdentity {
+	if x != nil {
+		return x.ReferencedResource
+	}
+	return nil
+}
+
+func (x *DiagnosticItem) GetUnresolvedEndpoint() string {
+	if x != nil {
+		return x.UnresolvedEndpoint
+	}
+	return ""
+}
+
+func (x *DiagnosticItem) GetRelevance() DiagnosticRelevance {
+	if x != nil {
+		return x.Relevance
+	}
+	return DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_UNSPECIFIED
+}
+
+func (x *DiagnosticItem) GetCompletenessImpact() CompletenessStatus {
+	if x != nil {
+		return x.CompletenessImpact
+	}
+	return CompletenessStatus_COMPLETENESS_STATUS_UNSPECIFIED
+}
+
+func (x *DiagnosticItem) GetFirstObservedAt() string {
+	if x != nil {
+		return x.FirstObservedAt
+	}
+	return ""
+}
+
+func (x *DiagnosticItem) GetLastObservedAt() string {
+	if x != nil {
+		return x.LastObservedAt
 	}
 	return ""
 }
@@ -1871,7 +1972,11 @@ type LoadStateRequest struct {
 	// Provenance associations linking relationships to evidence IDs.
 	Associations []*RelationshipEvidence `protobuf:"bytes,3,rep,name=associations,proto3" json:"associations,omitempty"`
 	// Evidence observations supporting the relationships.
-	Evidence      []*Evidence `protobuf:"bytes,4,rep,name=evidence,proto3" json:"evidence,omitempty"`
+	Evidence []*Evidence `protobuf:"bytes,4,rep,name=evidence,proto3" json:"evidence,omitempty"`
+	// Directly observed resources in authoritative state.
+	ObservedResources []*ResourceIdentity `protobuf:"bytes,5,rep,name=observed_resources,json=observedResources,proto3" json:"observed_resources,omitempty"`
+	// Diagnostics affecting workspace or graph entities.
+	Diagnostics   []*DiagnosticItem `protobuf:"bytes,6,rep,name=diagnostics,proto3" json:"diagnostics,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1930,6 +2035,20 @@ func (x *LoadStateRequest) GetAssociations() []*RelationshipEvidence {
 func (x *LoadStateRequest) GetEvidence() []*Evidence {
 	if x != nil {
 		return x.Evidence
+	}
+	return nil
+}
+
+func (x *LoadStateRequest) GetObservedResources() []*ResourceIdentity {
+	if x != nil {
+		return x.ObservedResources
+	}
+	return nil
+}
+
+func (x *LoadStateRequest) GetDiagnostics() []*DiagnosticItem {
+	if x != nil {
+		return x.Diagnostics
 	}
 	return nil
 }
@@ -2099,14 +2218,21 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"\vis_complete\x18\x01 \x01(\bR\n" +
 	"isComplete\x126\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x1e.wb.core.v1.CompletenessStatusR\x06status\x12\x18\n" +
-	"\areasons\x18\x03 \x03(\tR\areasons\"\xfe\x01\n" +
+	"\areasons\x18\x03 \x03(\tR\areasons\"\xe4\x04\n" +
 	"\x0eDiagnosticItem\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12:\n" +
 	"\bseverity\x18\x02 \x01(\x0e2\x1e.wb.core.v1.DiagnosticSeverityR\bseverity\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x124\n" +
 	"\x06target\x18\x04 \x01(\v2\x1c.wb.core.v1.ResourceIdentityR\x06target\x126\n" +
 	"\x17supporting_evidence_ids\x18\x05 \x03(\tR\x15supportingEvidenceIds\x12\x14\n" +
-	"\x05scope\x18\x06 \x01(\tR\x05scope\"\x94\x05\n" +
+	"\x05scope\x18\x06 \x01(\tR\x05scope\x12M\n" +
+	"\x13referenced_resource\x18\a \x01(\v2\x1c.wb.core.v1.ResourceIdentityR\x12referencedResource\x12/\n" +
+	"\x13unresolved_endpoint\x18\b \x01(\tR\x12unresolvedEndpoint\x12=\n" +
+	"\trelevance\x18\t \x01(\x0e2\x1f.wb.core.v1.DiagnosticRelevanceR\trelevance\x12O\n" +
+	"\x13completeness_impact\x18\n" +
+	" \x01(\x0e2\x1e.wb.core.v1.CompletenessStatusR\x12completenessImpact\x12*\n" +
+	"\x11first_observed_at\x18\v \x01(\tR\x0ffirstObservedAt\x12(\n" +
+	"\x10last_observed_at\x18\f \x01(\tR\x0elastObservedAt\"\x94\x05\n" +
 	"\x15AnalyzeImpactResponse\x124\n" +
 	"\x06target\x18\x01 \x01(\v2\x1c.wb.core.v1.ResourceIdentityR\x06target\x123\n" +
 	"\asummary\x18\x02 \x01(\v2\x19.wb.core.v1.ImpactSummaryR\asummary\x12K\n" +
@@ -2121,12 +2247,14 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	" \x03(\v2\x1a.wb.core.v1.DiagnosticItemR\vdiagnostics\"w\n" +
 	"\x14RelationshipEvidence\x12<\n" +
 	"\frelationship\x18\x01 \x01(\v2\x18.wb.core.v1.RelationshipR\frelationship\x12!\n" +
-	"\fevidence_ids\x18\x02 \x03(\tR\vevidenceIds\"\xed\x01\n" +
+	"\fevidence_ids\x18\x02 \x03(\tR\vevidenceIds\"\xf8\x02\n" +
 	"\x10LoadStateRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12>\n" +
 	"\rrelationships\x18\x02 \x03(\v2\x18.wb.core.v1.RelationshipR\rrelationships\x12D\n" +
 	"\fassociations\x18\x03 \x03(\v2 .wb.core.v1.RelationshipEvidenceR\fassociations\x120\n" +
-	"\bevidence\x18\x04 \x03(\v2\x14.wb.core.v1.EvidenceR\bevidence\"\xca\x01\n" +
+	"\bevidence\x18\x04 \x03(\v2\x14.wb.core.v1.EvidenceR\bevidence\x12K\n" +
+	"\x12observed_resources\x18\x05 \x03(\v2\x1c.wb.core.v1.ResourceIdentityR\x11observedResources\x12<\n" +
+	"\vdiagnostics\x18\x06 \x03(\v2\x1a.wb.core.v1.DiagnosticItemR\vdiagnostics\"\xca\x01\n" +
 	"\x11LoadStateResponse\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x121\n" +
 	"\x14relationships_loaded\x18\x02 \x01(\rR\x13relationshipsLoaded\x12'\n" +
@@ -2148,7 +2276,12 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"\x1fDIAGNOSTIC_SEVERITY_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18DIAGNOSTIC_SEVERITY_INFO\x10\x01\x12\x1f\n" +
 	"\x1bDIAGNOSTIC_SEVERITY_WARNING\x10\x02\x12\x1d\n" +
-	"\x19DIAGNOSTIC_SEVERITY_ERROR\x10\x032e\n" +
+	"\x19DIAGNOSTIC_SEVERITY_ERROR\x10\x03*\xa7\x01\n" +
+	"\x13DiagnosticRelevance\x12$\n" +
+	" DIAGNOSTIC_RELEVANCE_UNSPECIFIED\x10\x00\x12\x1f\n" +
+	"\x1bDIAGNOSTIC_RELEVANCE_TARGET\x10\x01\x12%\n" +
+	"!DIAGNOSTIC_RELEVANCE_BLAST_RADIUS\x10\x02\x12\"\n" +
+	"\x1eDIAGNOSTIC_RELEVANCE_WORKSPACE\x10\x032e\n" +
 	"\x10DiscoveryService\x12Q\n" +
 	"\fRunDiscovery\x12\x1f.wb.core.v1.RunDiscoveryRequest\x1a .wb.core.v1.RunDiscoveryResponse2\xaf\x01\n" +
 	"\rAnswerService\x12T\n" +
@@ -2167,90 +2300,96 @@ func file_wb_core_v1_core_proto_rawDescGZIP() []byte {
 	return file_wb_core_v1_core_proto_rawDescData
 }
 
-var file_wb_core_v1_core_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_wb_core_v1_core_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_wb_core_v1_core_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_wb_core_v1_core_proto_goTypes = []any{
 	(ChangeType)(0),                // 0: wb.core.v1.ChangeType
 	(CompletenessStatus)(0),        // 1: wb.core.v1.CompletenessStatus
 	(DiagnosticSeverity)(0),        // 2: wb.core.v1.DiagnosticSeverity
-	(*ResourceIdentity)(nil),       // 3: wb.core.v1.ResourceIdentity
-	(*EvidenceSource)(nil),         // 4: wb.core.v1.EvidenceSource
-	(*Evidence)(nil),               // 5: wb.core.v1.Evidence
-	(*Relationship)(nil),           // 6: wb.core.v1.Relationship
-	(*DiscoveredRelationship)(nil), // 7: wb.core.v1.DiscoveredRelationship
-	(*DiscoveryResult)(nil),        // 8: wb.core.v1.DiscoveryResult
-	(*Insufficient)(nil),           // 9: wb.core.v1.Insufficient
-	(*Conflict)(nil),               // 10: wb.core.v1.Conflict
-	(*Invalid)(nil),                // 11: wb.core.v1.Invalid
-	(*RunDiscoveryRequest)(nil),    // 12: wb.core.v1.RunDiscoveryRequest
-	(*RunDiscoveryResponse)(nil),   // 13: wb.core.v1.RunDiscoveryResponse
-	(*ProposedChange)(nil),         // 14: wb.core.v1.ProposedChange
-	(*ChangeAssessment)(nil),       // 15: wb.core.v1.ChangeAssessment
-	(*AnalyzeImpactRequest)(nil),   // 16: wb.core.v1.AnalyzeImpactRequest
-	(*ImpactSummary)(nil),          // 17: wb.core.v1.ImpactSummary
-	(*ImpactedResource)(nil),       // 18: wb.core.v1.ImpactedResource
-	(*AnswerRelationship)(nil),     // 19: wb.core.v1.AnswerRelationship
-	(*ImpactPath)(nil),             // 20: wb.core.v1.ImpactPath
-	(*AnswerEvidence)(nil),         // 21: wb.core.v1.AnswerEvidence
-	(*ExplanationFact)(nil),        // 22: wb.core.v1.ExplanationFact
-	(*AnalysisCompleteness)(nil),   // 23: wb.core.v1.AnalysisCompleteness
-	(*DiagnosticItem)(nil),         // 24: wb.core.v1.DiagnosticItem
-	(*AnalyzeImpactResponse)(nil),  // 25: wb.core.v1.AnalyzeImpactResponse
-	(*RelationshipEvidence)(nil),   // 26: wb.core.v1.RelationshipEvidence
-	(*LoadStateRequest)(nil),       // 27: wb.core.v1.LoadStateRequest
-	(*LoadStateResponse)(nil),      // 28: wb.core.v1.LoadStateResponse
+	(DiagnosticRelevance)(0),       // 3: wb.core.v1.DiagnosticRelevance
+	(*ResourceIdentity)(nil),       // 4: wb.core.v1.ResourceIdentity
+	(*EvidenceSource)(nil),         // 5: wb.core.v1.EvidenceSource
+	(*Evidence)(nil),               // 6: wb.core.v1.Evidence
+	(*Relationship)(nil),           // 7: wb.core.v1.Relationship
+	(*DiscoveredRelationship)(nil), // 8: wb.core.v1.DiscoveredRelationship
+	(*DiscoveryResult)(nil),        // 9: wb.core.v1.DiscoveryResult
+	(*Insufficient)(nil),           // 10: wb.core.v1.Insufficient
+	(*Conflict)(nil),               // 11: wb.core.v1.Conflict
+	(*Invalid)(nil),                // 12: wb.core.v1.Invalid
+	(*RunDiscoveryRequest)(nil),    // 13: wb.core.v1.RunDiscoveryRequest
+	(*RunDiscoveryResponse)(nil),   // 14: wb.core.v1.RunDiscoveryResponse
+	(*ProposedChange)(nil),         // 15: wb.core.v1.ProposedChange
+	(*ChangeAssessment)(nil),       // 16: wb.core.v1.ChangeAssessment
+	(*AnalyzeImpactRequest)(nil),   // 17: wb.core.v1.AnalyzeImpactRequest
+	(*ImpactSummary)(nil),          // 18: wb.core.v1.ImpactSummary
+	(*ImpactedResource)(nil),       // 19: wb.core.v1.ImpactedResource
+	(*AnswerRelationship)(nil),     // 20: wb.core.v1.AnswerRelationship
+	(*ImpactPath)(nil),             // 21: wb.core.v1.ImpactPath
+	(*AnswerEvidence)(nil),         // 22: wb.core.v1.AnswerEvidence
+	(*ExplanationFact)(nil),        // 23: wb.core.v1.ExplanationFact
+	(*AnalysisCompleteness)(nil),   // 24: wb.core.v1.AnalysisCompleteness
+	(*DiagnosticItem)(nil),         // 25: wb.core.v1.DiagnosticItem
+	(*AnalyzeImpactResponse)(nil),  // 26: wb.core.v1.AnalyzeImpactResponse
+	(*RelationshipEvidence)(nil),   // 27: wb.core.v1.RelationshipEvidence
+	(*LoadStateRequest)(nil),       // 28: wb.core.v1.LoadStateRequest
+	(*LoadStateResponse)(nil),      // 29: wb.core.v1.LoadStateResponse
 }
 var file_wb_core_v1_core_proto_depIdxs = []int32{
-	4,  // 0: wb.core.v1.Evidence.source:type_name -> wb.core.v1.EvidenceSource
-	3,  // 1: wb.core.v1.Evidence.subject:type_name -> wb.core.v1.ResourceIdentity
-	3,  // 2: wb.core.v1.Relationship.source:type_name -> wb.core.v1.ResourceIdentity
-	3,  // 3: wb.core.v1.Relationship.target:type_name -> wb.core.v1.ResourceIdentity
-	6,  // 4: wb.core.v1.DiscoveredRelationship.relationship:type_name -> wb.core.v1.Relationship
-	7,  // 5: wb.core.v1.DiscoveryResult.discovered:type_name -> wb.core.v1.DiscoveredRelationship
-	9,  // 6: wb.core.v1.DiscoveryResult.insufficient:type_name -> wb.core.v1.Insufficient
-	10, // 7: wb.core.v1.DiscoveryResult.conflict:type_name -> wb.core.v1.Conflict
-	11, // 8: wb.core.v1.DiscoveryResult.invalid:type_name -> wb.core.v1.Invalid
-	5,  // 9: wb.core.v1.RunDiscoveryRequest.evidence:type_name -> wb.core.v1.Evidence
-	8,  // 10: wb.core.v1.RunDiscoveryResponse.results:type_name -> wb.core.v1.DiscoveryResult
+	5,  // 0: wb.core.v1.Evidence.source:type_name -> wb.core.v1.EvidenceSource
+	4,  // 1: wb.core.v1.Evidence.subject:type_name -> wb.core.v1.ResourceIdentity
+	4,  // 2: wb.core.v1.Relationship.source:type_name -> wb.core.v1.ResourceIdentity
+	4,  // 3: wb.core.v1.Relationship.target:type_name -> wb.core.v1.ResourceIdentity
+	7,  // 4: wb.core.v1.DiscoveredRelationship.relationship:type_name -> wb.core.v1.Relationship
+	8,  // 5: wb.core.v1.DiscoveryResult.discovered:type_name -> wb.core.v1.DiscoveredRelationship
+	10, // 6: wb.core.v1.DiscoveryResult.insufficient:type_name -> wb.core.v1.Insufficient
+	11, // 7: wb.core.v1.DiscoveryResult.conflict:type_name -> wb.core.v1.Conflict
+	12, // 8: wb.core.v1.DiscoveryResult.invalid:type_name -> wb.core.v1.Invalid
+	6,  // 9: wb.core.v1.RunDiscoveryRequest.evidence:type_name -> wb.core.v1.Evidence
+	9,  // 10: wb.core.v1.RunDiscoveryResponse.results:type_name -> wb.core.v1.DiscoveryResult
 	0,  // 11: wb.core.v1.ProposedChange.change_type:type_name -> wb.core.v1.ChangeType
 	0,  // 12: wb.core.v1.ChangeAssessment.change_type:type_name -> wb.core.v1.ChangeType
-	3,  // 13: wb.core.v1.AnalyzeImpactRequest.target:type_name -> wb.core.v1.ResourceIdentity
-	14, // 14: wb.core.v1.AnalyzeImpactRequest.proposed_change:type_name -> wb.core.v1.ProposedChange
-	3,  // 15: wb.core.v1.ImpactedResource.resource:type_name -> wb.core.v1.ResourceIdentity
-	6,  // 16: wb.core.v1.AnswerRelationship.relationship:type_name -> wb.core.v1.Relationship
-	3,  // 17: wb.core.v1.ImpactPath.resources:type_name -> wb.core.v1.ResourceIdentity
-	6,  // 18: wb.core.v1.ImpactPath.relationships:type_name -> wb.core.v1.Relationship
-	4,  // 19: wb.core.v1.AnswerEvidence.source:type_name -> wb.core.v1.EvidenceSource
-	20, // 20: wb.core.v1.ExplanationFact.path:type_name -> wb.core.v1.ImpactPath
-	19, // 21: wb.core.v1.ExplanationFact.relationships:type_name -> wb.core.v1.AnswerRelationship
+	4,  // 13: wb.core.v1.AnalyzeImpactRequest.target:type_name -> wb.core.v1.ResourceIdentity
+	15, // 14: wb.core.v1.AnalyzeImpactRequest.proposed_change:type_name -> wb.core.v1.ProposedChange
+	4,  // 15: wb.core.v1.ImpactedResource.resource:type_name -> wb.core.v1.ResourceIdentity
+	7,  // 16: wb.core.v1.AnswerRelationship.relationship:type_name -> wb.core.v1.Relationship
+	4,  // 17: wb.core.v1.ImpactPath.resources:type_name -> wb.core.v1.ResourceIdentity
+	7,  // 18: wb.core.v1.ImpactPath.relationships:type_name -> wb.core.v1.Relationship
+	5,  // 19: wb.core.v1.AnswerEvidence.source:type_name -> wb.core.v1.EvidenceSource
+	21, // 20: wb.core.v1.ExplanationFact.path:type_name -> wb.core.v1.ImpactPath
+	20, // 21: wb.core.v1.ExplanationFact.relationships:type_name -> wb.core.v1.AnswerRelationship
 	1,  // 22: wb.core.v1.AnalysisCompleteness.status:type_name -> wb.core.v1.CompletenessStatus
 	2,  // 23: wb.core.v1.DiagnosticItem.severity:type_name -> wb.core.v1.DiagnosticSeverity
-	3,  // 24: wb.core.v1.DiagnosticItem.target:type_name -> wb.core.v1.ResourceIdentity
-	3,  // 25: wb.core.v1.AnalyzeImpactResponse.target:type_name -> wb.core.v1.ResourceIdentity
-	17, // 26: wb.core.v1.AnalyzeImpactResponse.summary:type_name -> wb.core.v1.ImpactSummary
-	18, // 27: wb.core.v1.AnalyzeImpactResponse.impacted_resources:type_name -> wb.core.v1.ImpactedResource
-	19, // 28: wb.core.v1.AnalyzeImpactResponse.relationships:type_name -> wb.core.v1.AnswerRelationship
-	20, // 29: wb.core.v1.AnalyzeImpactResponse.paths:type_name -> wb.core.v1.ImpactPath
-	21, // 30: wb.core.v1.AnalyzeImpactResponse.evidence:type_name -> wb.core.v1.AnswerEvidence
-	22, // 31: wb.core.v1.AnalyzeImpactResponse.explanation_facts:type_name -> wb.core.v1.ExplanationFact
-	15, // 32: wb.core.v1.AnalyzeImpactResponse.change_assessment:type_name -> wb.core.v1.ChangeAssessment
-	23, // 33: wb.core.v1.AnalyzeImpactResponse.completeness:type_name -> wb.core.v1.AnalysisCompleteness
-	24, // 34: wb.core.v1.AnalyzeImpactResponse.diagnostics:type_name -> wb.core.v1.DiagnosticItem
-	6,  // 35: wb.core.v1.RelationshipEvidence.relationship:type_name -> wb.core.v1.Relationship
-	6,  // 36: wb.core.v1.LoadStateRequest.relationships:type_name -> wb.core.v1.Relationship
-	26, // 37: wb.core.v1.LoadStateRequest.associations:type_name -> wb.core.v1.RelationshipEvidence
-	5,  // 38: wb.core.v1.LoadStateRequest.evidence:type_name -> wb.core.v1.Evidence
-	12, // 39: wb.core.v1.DiscoveryService.RunDiscovery:input_type -> wb.core.v1.RunDiscoveryRequest
-	16, // 40: wb.core.v1.AnswerService.AnalyzeImpact:input_type -> wb.core.v1.AnalyzeImpactRequest
-	27, // 41: wb.core.v1.AnswerService.LoadState:input_type -> wb.core.v1.LoadStateRequest
-	13, // 42: wb.core.v1.DiscoveryService.RunDiscovery:output_type -> wb.core.v1.RunDiscoveryResponse
-	25, // 43: wb.core.v1.AnswerService.AnalyzeImpact:output_type -> wb.core.v1.AnalyzeImpactResponse
-	28, // 44: wb.core.v1.AnswerService.LoadState:output_type -> wb.core.v1.LoadStateResponse
-	42, // [42:45] is the sub-list for method output_type
-	39, // [39:42] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	4,  // 24: wb.core.v1.DiagnosticItem.target:type_name -> wb.core.v1.ResourceIdentity
+	4,  // 25: wb.core.v1.DiagnosticItem.referenced_resource:type_name -> wb.core.v1.ResourceIdentity
+	3,  // 26: wb.core.v1.DiagnosticItem.relevance:type_name -> wb.core.v1.DiagnosticRelevance
+	1,  // 27: wb.core.v1.DiagnosticItem.completeness_impact:type_name -> wb.core.v1.CompletenessStatus
+	4,  // 28: wb.core.v1.AnalyzeImpactResponse.target:type_name -> wb.core.v1.ResourceIdentity
+	18, // 29: wb.core.v1.AnalyzeImpactResponse.summary:type_name -> wb.core.v1.ImpactSummary
+	19, // 30: wb.core.v1.AnalyzeImpactResponse.impacted_resources:type_name -> wb.core.v1.ImpactedResource
+	20, // 31: wb.core.v1.AnalyzeImpactResponse.relationships:type_name -> wb.core.v1.AnswerRelationship
+	21, // 32: wb.core.v1.AnalyzeImpactResponse.paths:type_name -> wb.core.v1.ImpactPath
+	22, // 33: wb.core.v1.AnalyzeImpactResponse.evidence:type_name -> wb.core.v1.AnswerEvidence
+	23, // 34: wb.core.v1.AnalyzeImpactResponse.explanation_facts:type_name -> wb.core.v1.ExplanationFact
+	16, // 35: wb.core.v1.AnalyzeImpactResponse.change_assessment:type_name -> wb.core.v1.ChangeAssessment
+	24, // 36: wb.core.v1.AnalyzeImpactResponse.completeness:type_name -> wb.core.v1.AnalysisCompleteness
+	25, // 37: wb.core.v1.AnalyzeImpactResponse.diagnostics:type_name -> wb.core.v1.DiagnosticItem
+	7,  // 38: wb.core.v1.RelationshipEvidence.relationship:type_name -> wb.core.v1.Relationship
+	7,  // 39: wb.core.v1.LoadStateRequest.relationships:type_name -> wb.core.v1.Relationship
+	27, // 40: wb.core.v1.LoadStateRequest.associations:type_name -> wb.core.v1.RelationshipEvidence
+	6,  // 41: wb.core.v1.LoadStateRequest.evidence:type_name -> wb.core.v1.Evidence
+	4,  // 42: wb.core.v1.LoadStateRequest.observed_resources:type_name -> wb.core.v1.ResourceIdentity
+	25, // 43: wb.core.v1.LoadStateRequest.diagnostics:type_name -> wb.core.v1.DiagnosticItem
+	13, // 44: wb.core.v1.DiscoveryService.RunDiscovery:input_type -> wb.core.v1.RunDiscoveryRequest
+	17, // 45: wb.core.v1.AnswerService.AnalyzeImpact:input_type -> wb.core.v1.AnalyzeImpactRequest
+	28, // 46: wb.core.v1.AnswerService.LoadState:input_type -> wb.core.v1.LoadStateRequest
+	14, // 47: wb.core.v1.DiscoveryService.RunDiscovery:output_type -> wb.core.v1.RunDiscoveryResponse
+	26, // 48: wb.core.v1.AnswerService.AnalyzeImpact:output_type -> wb.core.v1.AnalyzeImpactResponse
+	29, // 49: wb.core.v1.AnswerService.LoadState:output_type -> wb.core.v1.LoadStateResponse
+	47, // [47:50] is the sub-list for method output_type
+	44, // [44:47] is the sub-list for method input_type
+	44, // [44:44] is the sub-list for extension type_name
+	44, // [44:44] is the sub-list for extension extendee
+	0,  // [0:44] is the sub-list for field type_name
 }
 
 func init() { file_wb_core_v1_core_proto_init() }
@@ -2269,7 +2408,7 @@ func file_wb_core_v1_core_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wb_core_v1_core_proto_rawDesc), len(file_wb_core_v1_core_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      4,
 			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   2,

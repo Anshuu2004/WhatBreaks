@@ -21,6 +21,8 @@ type MemoryStore struct {
 	conflicts     map[string][]DiscoveryConflict
 	authorities   map[string]map[string]WorkspaceAuthority
 	staleAudits   map[string][]StaleRunAudit
+	diagnostics   map[string]map[string]DiagnosticItem
+	scopeSweeps   map[string]map[string]ScopeSweep
 }
 
 // NewMemoryStore initializes an empty MemoryStore.
@@ -34,6 +36,8 @@ func NewMemoryStore() *MemoryStore {
 		conflicts:     make(map[string][]DiscoveryConflict),
 		authorities:   make(map[string]map[string]WorkspaceAuthority),
 		staleAudits:   make(map[string][]StaleRunAudit),
+		diagnostics:   make(map[string]map[string]DiagnosticItem),
+		scopeSweeps:   make(map[string]map[string]ScopeSweep),
 	}
 }
 
@@ -380,12 +384,28 @@ func (s *MemoryStore) LoadAssembledState(ctx context.Context, workspaceID string
 		prov[k] = sortedEvs
 	}
 
+	var diagnostics []DiagnosticItem
+	if diagMap, ok := s.diagnostics[ws]; ok {
+		for _, d := range diagMap {
+			if !d.Resolved {
+				diagnostics = append(diagnostics, d)
+			}
+		}
+		sort.Slice(diagnostics, func(i, j int) bool {
+			return diagnostics[i].NaturalKey() < diagnostics[j].NaturalKey()
+		})
+	}
+	if diagnostics == nil {
+		diagnostics = []DiagnosticItem{}
+	}
+
 	return &AssembledState{
 		WorkspaceID:   ws,
 		Resources:     resources,
 		Relationships: relationships,
 		Evidence:      evidence,
 		Provenance:    prov,
+		Diagnostics:   diagnostics,
 	}, nil
 }
 
@@ -404,8 +424,168 @@ func (s *MemoryStore) DeleteWorkspaceState(ctx context.Context, workspaceID stri
 	delete(s.relToEvidence, ws)
 	delete(s.evToRel, ws)
 	delete(s.conflicts, ws)
+	delete(s.diagnostics, ws)
+	delete(s.scopeSweeps, ws)
 
 	return nil
+}
+
+func (s *MemoryStore) ListDiagnostics(ctx context.Context, workspaceID string) ([]DiagnosticItem, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	diagMap, ok := s.diagnostics[ws]
+	if !ok {
+		return []DiagnosticItem{}, nil
+	}
+
+	var out []DiagnosticItem
+	for _, d := range diagMap {
+		if !d.Resolved {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].NaturalKey() < out[j].NaturalKey()
+	})
+	if out == nil {
+		out = []DiagnosticItem{}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) SaveDiagnostics(ctx context.Context, workspaceID string, diagnostics []DiagnosticItem) error {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return ErrInvalidWorkspace
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	diagMap, ok := s.diagnostics[ws]
+	if !ok {
+		diagMap = make(map[string]DiagnosticItem)
+		s.diagnostics[ws] = diagMap
+	}
+
+	for _, d := range diagnostics {
+		d.WorkspaceID = ws
+		k := d.NaturalKey()
+		existing, found := diagMap[k]
+		if !found {
+			if d.FirstObservedAt.IsZero() {
+				d.FirstObservedAt = time.Now().UTC()
+			}
+			if d.LastObservedAt.IsZero() {
+				d.LastObservedAt = d.FirstObservedAt
+			}
+			if d.EvidenceIDs == nil {
+				d.EvidenceIDs = []string{}
+			}
+			sort.Strings(d.EvidenceIDs)
+			diagMap[k] = d
+		} else {
+			if d.LastObservedAt.After(existing.LastObservedAt) {
+				existing.LastObservedAt = d.LastObservedAt
+			}
+			existing.Severity = d.Severity
+			existing.Message = d.Message
+			existing.Relevance = d.Relevance
+			existing.CompletenessImpact = d.CompletenessImpact
+			existing.Resolved = false
+			existing.ResolvedAt = nil
+
+			evMap := make(map[string]bool)
+			for _, id := range existing.EvidenceIDs {
+				evMap[id] = true
+			}
+			for _, id := range d.EvidenceIDs {
+				evMap[id] = true
+			}
+			merged := make([]string, 0, len(evMap))
+			for id := range evMap {
+				merged = append(merged, id)
+			}
+			sort.Strings(merged)
+			existing.EvidenceIDs = merged
+			diagMap[k] = existing
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) SaveScopeSweep(ctx context.Context, sweep ScopeSweep) error {
+	ws := strings.TrimSpace(sweep.WorkspaceID)
+	if ws == "" {
+		return ErrInvalidWorkspace
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sweepMap, ok := s.scopeSweeps[ws]
+	if !ok {
+		sweepMap = make(map[string]ScopeSweep)
+		s.scopeSweeps[ws] = sweepMap
+	}
+	if sweep.ObservedAt.IsZero() {
+		sweep.ObservedAt = time.Now().UTC()
+	}
+	sweepMap[sweep.RunID] = sweep
+	return nil
+}
+
+func (s *MemoryStore) GetScopeSweep(ctx context.Context, workspaceID string, clusterID string, runID string) (*ScopeSweep, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sweepMap, ok := s.scopeSweeps[ws]
+	if !ok {
+		return nil, fmt.Errorf("scope sweep not found: %s", runID)
+	}
+	sweep, found := sweepMap[runID]
+	if !found {
+		return nil, fmt.Errorf("scope sweep not found: %s", runID)
+	}
+	return &sweep, nil
+}
+
+func (s *MemoryStore) ListScopeSweeps(ctx context.Context, workspaceID string) ([]ScopeSweep, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sweepMap, ok := s.scopeSweeps[ws]
+	if !ok {
+		return []ScopeSweep{}, nil
+	}
+
+	var out []ScopeSweep
+	for _, sw := range sweepMap {
+		out = append(out, sw)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
+	if out == nil {
+		out = []ScopeSweep{}
+	}
+	return out, nil
 }
 
 // ListWorkspaces returns all distinct workspace IDs in memory, sorted ascending.
@@ -696,6 +876,99 @@ func (s *MemoryStore) ReconcileAuthoritativeBatch(ctx context.Context, params Au
 	for _, conf := range params.Conflicts {
 		conf.WorkspaceID = ws
 		s.conflicts[ws] = append(s.conflicts[ws], conf)
+	}
+
+	// Diagnostics
+	diagMap, ok := s.diagnostics[ws]
+	if !ok {
+		diagMap = make(map[string]DiagnosticItem)
+		s.diagnostics[ws] = diagMap
+	}
+	for _, d := range params.Diagnostics {
+		d.WorkspaceID = ws
+		natKey := d.NaturalKey()
+		existing, found := diagMap[natKey]
+		if !found {
+			if d.FirstObservedAt.IsZero() {
+				d.FirstObservedAt = time.Now().UTC()
+			}
+			if d.LastObservedAt.IsZero() {
+				d.LastObservedAt = d.FirstObservedAt
+			}
+			if d.EvidenceIDs == nil {
+				d.EvidenceIDs = []string{}
+			}
+			sort.Strings(d.EvidenceIDs)
+			diagMap[natKey] = d
+		} else {
+			if d.LastObservedAt.After(existing.LastObservedAt) {
+				existing.LastObservedAt = d.LastObservedAt
+			}
+			existing.Severity = d.Severity
+			existing.Message = d.Message
+			existing.Relevance = d.Relevance
+			existing.CompletenessImpact = d.CompletenessImpact
+			existing.Resolved = false
+			existing.ResolvedAt = nil
+
+			evMap := make(map[string]bool)
+			for _, id := range existing.EvidenceIDs {
+				evMap[id] = true
+			}
+			for _, id := range d.EvidenceIDs {
+				evMap[id] = true
+			}
+			merged := make([]string, 0, len(evMap))
+			for id := range evMap {
+				merged = append(merged, id)
+			}
+			sort.Strings(merged)
+			existing.EvidenceIDs = merged
+			diagMap[natKey] = existing
+		}
+	}
+
+	// Resolve Diagnostics (only when no failed scopes)
+	if params.ScopeSweep == nil || len(params.ScopeSweep.FailedScopes) == 0 {
+		now := time.Now().UTC()
+		// 1. Resolve UNRESOLVED_REFERENCE for directly observed resources
+		for _, res := range params.Resources {
+			for k, diag := range diagMap {
+				if diag.Code == "UNRESOLVED_REFERENCE" && diag.ReferencedResource != nil && *diag.ReferencedResource == res.Identity && !diag.Resolved {
+					diag.Resolved = true
+					diag.ResolvedAt = &now
+					diagMap[k] = diag
+				}
+			}
+		}
+		// 2. Resolve INCOMPLETE_SCOPE for successful scopes
+		if params.ScopeSweep != nil {
+			for _, sc := range params.ScopeSweep.SuccessfulScopes {
+				for k, diag := range diagMap {
+					if diag.Code == "INCOMPLETE_SCOPE" && diag.Scope == sc && !diag.Resolved {
+						diag.Resolved = true
+						diag.ResolvedAt = &now
+						diagMap[k] = diag
+					}
+				}
+			}
+		}
+	}
+
+	// Scope Sweep
+	if params.ScopeSweep != nil {
+		sweepMap, ok := s.scopeSweeps[ws]
+		if !ok {
+			sweepMap = make(map[string]ScopeSweep)
+			s.scopeSweeps[ws] = sweepMap
+		}
+		sw := *params.ScopeSweep
+		sw.WorkspaceID = ws
+		sw.Generation = candidateGen
+		if sw.ObservedAt.IsZero() {
+			sw.ObservedAt = time.Now().UTC()
+		}
+		sweepMap[sw.RunID] = sw
 	}
 
 	// 4. Advance authority

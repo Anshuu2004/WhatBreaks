@@ -16,8 +16,10 @@
 //! - [`provenance`]: In-memory relationship provenance / evidence association store.
 //! - [`history`]: Relationship observation history and current-state derivation.
 //! - [`answer`]: Deterministic, explainable product-level answer engine.
+//! - [`diagnostic`]: Diagnostics and analysis completeness model.
 
 pub mod answer;
+pub mod diagnostic;
 pub mod discovery;
 pub mod evidence;
 pub mod graph;
@@ -31,6 +33,10 @@ pub mod traversal;
 pub use answer::{
     AnswerEngine, AnswerEvidence, AnswerRelationship, AnswerRequest, ExplanationFact, ImpactAnswer,
     ImpactPath, ImpactSummary,
+};
+pub use diagnostic::{
+    diagnostic_code, AnalysisCompleteness, CompletenessStatus, Diagnostic, DiagnosticRelevance,
+    DiagnosticSeverity,
 };
 pub use discovery::{
     DiscoveredRelationship, DiscoveryEngine, DiscoveryResult, DiscoveryRule, OwnershipRule,

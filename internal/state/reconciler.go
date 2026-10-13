@@ -2,8 +2,10 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +118,10 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		EvidenceCount: len(batch.Evidence),
 	}
 
+	if batch.ScopeSweep != nil && len(batch.ScopeSweep.RequiredFailures) > 0 {
+		return nil, fmt.Errorf("reconciler: required collection scope(s) failed: %s", strings.Join(batch.ScopeSweep.RequiredFailures, ", "))
+	}
+
 	if len(batch.Evidence) == 0 {
 		// Empty batch does NOT delete any state
 		if existingRes, err := r.store.ListResources(ctx, ws); err == nil {
@@ -195,7 +201,8 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 	var discoveredRels []Relationship
 	var provenanceAssocs []ProvenanceAssociation
 	var conflictsToSave []DiscoveryConflict
-	endpointResourcesMap := make(map[string]ResourceIdentity)
+	mappedEvidenceIDs := make(map[string]bool)
+	relEvidenceMap := make(map[RelationshipKey][]string)
 	now := time.Now().UTC()
 
 	if r.discovery != nil {
@@ -233,9 +240,6 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 					ProviderID:   relProto.Target.ProviderId,
 				}
 
-				endpointResourcesMap[src.String()] = src
-				endpointResourcesMap[tgt.String()] = tgt
-
 				relKey := RelationshipKey{Source: src, Target: tgt, Kind: relProto.Kind}
 
 				discoveredRels = append(discoveredRels, Relationship{
@@ -249,12 +253,14 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 				})
 
 				for _, evID := range disc.SupportingEvidenceIds {
+					mappedEvidenceIDs[evID] = true
 					provenanceAssocs = append(provenanceAssocs, ProvenanceAssociation{
 						WorkspaceID:  ws,
 						Relationship: relKey,
 						EvidenceID:   evID,
 					})
 				}
+				relEvidenceMap[relKey] = append(relEvidenceMap[relKey], disc.SupportingEvidenceIds...)
 
 			} else if conf := res.GetConflict(); conf != nil {
 				result.ConflictsCount++
@@ -288,7 +294,9 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		return nil, err
 	}
 
-	// 3. Assemble all resources to persist in memory (subjects + endpoints)
+	// 3. Assemble all resources to persist in memory (strictly directly observed subjects)
+	// Architectural Invariant B: An unverified relationship endpoint must NOT be promoted into
+	// state_resources merely because it appears in a relationship. No phantom resources are synthesized.
 	var resourcesToSave []Resource
 	for _, inc := range incomingSubjectResources {
 		resourcesToSave = append(resourcesToSave, Resource{
@@ -297,16 +305,6 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 			FirstObservedAt: inc.time,
 			LastObservedAt:  inc.time,
 		})
-	}
-	for _, epID := range endpointResourcesMap {
-		if _, exists := incomingSubjectResources[epID.String()]; !exists {
-			resourcesToSave = append(resourcesToSave, Resource{
-				WorkspaceID:     ws,
-				Identity:        epID,
-				FirstObservedAt: now,
-				LastObservedAt:  now,
-			})
-		}
 	}
 
 	// 4. Resolve collection run coordinates
@@ -328,6 +326,135 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		samplingStartedAt = start
 	}
 
+	// 4b. Generate Structured Operational & Completeness Diagnostics
+	// Determine all known observed resources: existing in store + incoming in batch
+	observedResourcesMap := make(map[string]bool)
+	if existingResList, err := r.store.ListResources(ctx, ws); err == nil {
+		for _, er := range existingResList {
+			observedResourcesMap[er.Identity.String()] = true
+		}
+	}
+	for k := range incomingSubjectResources {
+		observedResourcesMap[k] = true
+	}
+
+	diagMap := make(map[string]DiagnosticItem)
+
+	// 4b.1. UNRESOLVED_REFERENCE diagnostics for unobserved relationship endpoints
+	for _, rel := range discoveredRels {
+		if !observedResourcesMap[rel.Target.String()] {
+			d := DiagnosticItem{
+				WorkspaceID:        ws,
+				Code:               "UNRESOLVED_REFERENCE",
+				Severity:           "WARNING",
+				Message:            fmt.Sprintf("Referenced endpoint %s is unresolved", rel.Target.String()),
+				Subject:            &rel.Source,
+				ReferencedResource: &rel.Target,
+				UnresolvedEndpoint: rel.Target.String(),
+				Scope:              clusterID,
+				EvidenceIDs:        relEvidenceMap[rel.Key()],
+				Relevance:          "BLAST_RADIUS",
+				CompletenessImpact: "PARTIAL",
+				FirstObservedAt:    now,
+				LastObservedAt:     now,
+			}
+			mergeDiagnostic(diagMap, d)
+		}
+		if !observedResourcesMap[rel.Source.String()] {
+			d := DiagnosticItem{
+				WorkspaceID:        ws,
+				Code:               "UNRESOLVED_REFERENCE",
+				Severity:           "WARNING",
+				Message:            fmt.Sprintf("Source resource %s is unresolved", rel.Source.String()),
+				Subject:            &rel.Source,
+				ReferencedResource: &rel.Source,
+				UnresolvedEndpoint: rel.Source.String(),
+				Scope:              clusterID,
+				EvidenceIDs:        relEvidenceMap[rel.Key()],
+				Relevance:          "BLAST_RADIUS",
+				CompletenessImpact: "PARTIAL",
+				FirstObservedAt:    now,
+				LastObservedAt:     now,
+			}
+			mergeDiagnostic(diagMap, d)
+		}
+	}
+
+	// 4b.2. UNMAPPED_CONNECTION diagnostics for unmapped RUNTIME_CONNECTION evidence
+	for _, protoEv := range batch.Evidence {
+		if protoEv != nil && protoEv.ObservationType == "RUNTIME_CONNECTION" && !mappedEvidenceIDs[protoEv.Id] {
+			endpointStr := extractEndpointFromConnectionData(protoEv.Data)
+			caller := ResourceIdentity{
+				Provider:     protoEv.Subject.Provider,
+				ResourceType: protoEv.Subject.ResourceType,
+				ProviderID:   protoEv.Subject.ProviderId,
+			}
+			d := DiagnosticItem{
+				WorkspaceID:        ws,
+				Code:               "UNMAPPED_CONNECTION",
+				Severity:           "WARNING",
+				Message:            fmt.Sprintf("Runtime connection from %s to endpoint %s could not be mapped to any known target", caller.String(), endpointStr),
+				Subject:            &caller,
+				UnresolvedEndpoint: endpointStr,
+				Scope:              clusterID,
+				EvidenceIDs:        []string{protoEv.Id},
+				Relevance:          "BLAST_RADIUS",
+				CompletenessImpact: "PARTIAL",
+				FirstObservedAt:    now,
+				LastObservedAt:     now,
+			}
+			mergeDiagnostic(diagMap, d)
+		}
+	}
+
+	// 4b.3. INCOMPLETE_SCOPE diagnostics for optional scope failures
+	if batch.ScopeSweep != nil {
+		for _, sc := range batch.ScopeSweep.OptionalFailures {
+			d := DiagnosticItem{
+				WorkspaceID:        ws,
+				Code:               "INCOMPLETE_SCOPE",
+				Severity:           "WARNING",
+				Message:            fmt.Sprintf("Optional discovery scope %s failed during sweep", sc),
+				Scope:              sc,
+				Relevance:          "WORKSPACE",
+				CompletenessImpact: "PARTIAL",
+				FirstObservedAt:    now,
+				LastObservedAt:     now,
+			}
+			mergeDiagnostic(diagMap, d)
+		}
+	}
+
+	// 4b.4. DISCOVERY_CONFLICT diagnostics
+	for _, conf := range conflictsToSave {
+		d := DiagnosticItem{
+			WorkspaceID:        ws,
+			Code:               "DISCOVERY_CONFLICT",
+			Severity:           "WARNING",
+			Message:            conf.Description,
+			Scope:              clusterID,
+			Relevance:          "WORKSPACE",
+			CompletenessImpact: "PARTIAL",
+			FirstObservedAt:    now,
+			LastObservedAt:     now,
+		}
+		mergeDiagnostic(diagMap, d)
+	}
+
+	// 4b.5. Merge any caller-provided diagnostics
+	for _, d := range batch.Diagnostics {
+		d.WorkspaceID = ws
+		mergeDiagnostic(diagMap, d)
+	}
+
+	var diagnosticsToSave []DiagnosticItem
+	for _, d := range diagMap {
+		diagnosticsToSave = append(diagnosticsToSave, d)
+	}
+	sort.Slice(diagnosticsToSave, func(i, j int) bool {
+		return diagnosticsToSave[i].NaturalKey() < diagnosticsToSave[j].NaturalKey()
+	})
+
 	// 5. ATOMIC AUTHORITATIVE RECONCILIATION IN A SINGLE TRANSACTION
 	// Objectives 2, 3, 4, 5, 6, 7, 9, 10
 	batchParams := AuthoritativeBatchParams{
@@ -341,6 +468,8 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		Relationships:     discoveredRels,
 		Provenance:        provenanceAssocs,
 		Conflicts:         conflictsToSave,
+		Diagnostics:       diagnosticsToSave,
+		ScopeSweep:        batch.ScopeSweep,
 	}
 
 	batchRes, err := r.store.ReconcileAuthoritativeBatch(ctx, batchParams)
@@ -430,4 +559,65 @@ func (r *DefaultReconciler) Rematerialize(ctx context.Context, workspaceID strin
 	}
 	_, err := r.materializer.Materialize(ctx, ws)
 	return err
+}
+
+func mergeDiagnostic(m map[string]DiagnosticItem, d DiagnosticItem) {
+	k := d.NaturalKey()
+	existing, found := m[k]
+	if !found {
+		evIDs := d.EvidenceIDs
+		if evIDs == nil {
+			evIDs = []string{}
+		}
+		sort.Strings(evIDs)
+		d.EvidenceIDs = evIDs
+		m[k] = d
+		return
+	}
+	if d.LastObservedAt.After(existing.LastObservedAt) {
+		existing.LastObservedAt = d.LastObservedAt
+	}
+	evMap := make(map[string]bool)
+	for _, id := range existing.EvidenceIDs {
+		evMap[id] = true
+	}
+	for _, id := range d.EvidenceIDs {
+		evMap[id] = true
+	}
+	merged := make([]string, 0, len(evMap))
+	for id := range evMap {
+		merged = append(merged, id)
+	}
+	sort.Strings(merged)
+	existing.EvidenceIDs = merged
+	m[k] = existing
+}
+
+func extractEndpointFromConnectionData(data []byte) string {
+	if len(data) == 0 {
+		return "unknown"
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return string(data)
+	}
+	if ep, ok := m["endpoint"].(string); ok && ep != "" {
+		return ep
+	}
+	if dest, ok := m["dest"].(string); ok && dest != "" {
+		if port, ok := m["port"]; ok {
+			return fmt.Sprintf("%v:%v", dest, port)
+		}
+		return dest
+	}
+	if dest, ok := m["destination"].(string); ok && dest != "" {
+		if port, ok := m["port"]; ok {
+			return fmt.Sprintf("%v:%v", dest, port)
+		}
+		return dest
+	}
+	if call, ok := m["call"].(string); ok && call != "" {
+		return call
+	}
+	return "unknown"
 }

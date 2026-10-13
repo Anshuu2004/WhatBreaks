@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
@@ -98,6 +99,7 @@ type AssembledState struct {
 	Relationships []Relationship               `json:"relationships"`
 	Evidence      []Evidence                   `json:"evidence"`
 	Provenance    map[RelationshipKey][]string `json:"provenance"`
+	Diagnostics   []DiagnosticItem             `json:"diagnostics"`
 }
 
 // ScopeBoundary represents an optional authoritative scope declaration (e.g., a specific cluster or namespace inventory).
@@ -147,6 +149,8 @@ type AuthoritativeBatchParams struct {
 	Relationships     []Relationship
 	Provenance        []ProvenanceAssociation
 	Conflicts         []DiscoveryConflict
+	Diagnostics       []DiagnosticItem
+	ScopeSweep        *ScopeSweep
 }
 
 // AuthoritativeBatchResult reports the outcome of the authoritative batch transaction.
@@ -171,4 +175,135 @@ type ObservationBatch struct {
 	Generation        int64              `json:"generation,omitempty"`
 	Evidence          []*corev1.Evidence `json:"evidence"`
 	Scope             *ScopeBoundary     `json:"scope,omitempty"`
+	ScopeSweep        *ScopeSweep        `json:"scope_sweep,omitempty"`
+	Diagnostics       []DiagnosticItem   `json:"diagnostics,omitempty"`
+}
+
+// DiagnosticItem represents a durable operational or completeness diagnostic affecting a workspace or analysis.
+type DiagnosticItem struct {
+	WorkspaceID        string            `json:"workspace_id"`
+	Code               string            `json:"code"`
+	Severity           string            `json:"severity"`
+	Message            string            `json:"message"`
+	Subject            *ResourceIdentity `json:"subject,omitempty"`
+	ReferencedResource *ResourceIdentity `json:"referenced_resource,omitempty"`
+	UnresolvedEndpoint string            `json:"unresolved_endpoint,omitempty"`
+	Scope              string            `json:"scope,omitempty"`
+	EvidenceIDs        []string          `json:"evidence_ids,omitempty"`
+	Relevance          string            `json:"relevance,omitempty"`
+	CompletenessImpact string            `json:"completeness_impact,omitempty"`
+	FirstObservedAt    time.Time         `json:"first_observed_at"`
+	LastObservedAt     time.Time         `json:"last_observed_at"`
+	Resolved           bool              `json:"resolved"`
+	ResolvedAt         *time.Time        `json:"resolved_at,omitempty"`
+}
+
+// NaturalKey returns the deterministic logical identity key for deduplication and persistence.
+func (d DiagnosticItem) NaturalKey() string {
+	subStr := ""
+	if d.Subject != nil {
+		subStr = d.Subject.String()
+	}
+	refStr := ""
+	if d.ReferencedResource != nil {
+		refStr = d.ReferencedResource.String()
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+		d.WorkspaceID,
+		d.Code,
+		subStr,
+		refStr,
+		d.UnresolvedEndpoint,
+		d.Scope,
+	)
+}
+
+// ToProto converts a domain DiagnosticItem into its protobuf representation.
+func (d DiagnosticItem) ToProto() *corev1.DiagnosticItem {
+	var sev corev1.DiagnosticSeverity
+	switch strings.ToUpper(d.Severity) {
+	case "INFO":
+		sev = corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_INFO
+	case "WARNING":
+		sev = corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_WARNING
+	case "ERROR":
+		sev = corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_ERROR
+	default:
+		sev = corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_WARNING
+	}
+
+	var rel corev1.DiagnosticRelevance
+	switch strings.ToUpper(d.Relevance) {
+	case "TARGET":
+		rel = corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_TARGET
+	case "BLAST_RADIUS":
+		rel = corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_BLAST_RADIUS
+	case "WORKSPACE":
+		rel = corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_WORKSPACE
+	default:
+		rel = corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_WORKSPACE
+	}
+
+	var comp corev1.CompletenessStatus
+	switch strings.ToUpper(d.CompletenessImpact) {
+	case "COMPLETE":
+		comp = corev1.CompletenessStatus_COMPLETENESS_STATUS_COMPLETE
+	case "PARTIAL":
+		comp = corev1.CompletenessStatus_COMPLETENESS_STATUS_PARTIAL
+	case "DEGRADED":
+		comp = corev1.CompletenessStatus_COMPLETENESS_STATUS_DEGRADED
+	default:
+		comp = corev1.CompletenessStatus_COMPLETENESS_STATUS_PARTIAL
+	}
+
+	proto := &corev1.DiagnosticItem{
+		Code:                  d.Code,
+		Severity:              sev,
+		Message:               d.Message,
+		SupportingEvidenceIds: d.EvidenceIDs,
+		Scope:                 d.Scope,
+		UnresolvedEndpoint:    d.UnresolvedEndpoint,
+		Relevance:             rel,
+		CompletenessImpact:    comp,
+	}
+
+	if d.Subject != nil {
+		proto.Target = &corev1.ResourceIdentity{
+			Provider:     d.Subject.Provider,
+			ResourceType: d.Subject.ResourceType,
+			ProviderId:   d.Subject.ProviderID,
+		}
+	}
+
+	if d.ReferencedResource != nil {
+		proto.ReferencedResource = &corev1.ResourceIdentity{
+			Provider:     d.ReferencedResource.Provider,
+			ResourceType: d.ReferencedResource.ResourceType,
+			ProviderId:   d.ReferencedResource.ProviderID,
+		}
+	}
+
+	if !d.FirstObservedAt.IsZero() {
+		proto.FirstObservedAt = d.FirstObservedAt.Format(time.RFC3339Nano)
+	}
+	if !d.LastObservedAt.IsZero() {
+		proto.LastObservedAt = d.LastObservedAt.Format(time.RFC3339Nano)
+	}
+
+	return proto
+}
+
+// ScopeSweep records the completeness and outcome of an individual collection scope sweep.
+type ScopeSweep struct {
+	WorkspaceID       string            `json:"workspace_id"`
+	ClusterID         string            `json:"cluster_id"`
+	RunID             string            `json:"run_id"`
+	SamplingStartedAt time.Time         `json:"sampling_started_at"`
+	Generation        int64             `json:"generation"`
+	SuccessfulScopes  []string          `json:"successful_scopes"`
+	FailedScopes      []string          `json:"failed_scopes"`
+	RequiredFailures  []string          `json:"required_failures"`
+	OptionalFailures  []string          `json:"optional_failures"`
+	ScopeErrors       map[string]string `json:"scope_errors"`
+	ObservedAt        time.Time         `json:"observed_at"`
 }

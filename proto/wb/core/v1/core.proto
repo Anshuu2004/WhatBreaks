@@ -333,6 +333,14 @@ enum DiagnosticSeverity {
   DIAGNOSTIC_SEVERITY_ERROR = 3;
 }
 
+// Relevance of a diagnostic to the requested analysis or graph traversal.
+enum DiagnosticRelevance {
+  DIAGNOSTIC_RELEVANCE_UNSPECIFIED = 0;
+  DIAGNOSTIC_RELEVANCE_TARGET = 1;
+  DIAGNOSTIC_RELEVANCE_BLAST_RADIUS = 2;
+  DIAGNOSTIC_RELEVANCE_WORKSPACE = 3;
+}
+
 // Machine-readable diagnostic item detailing dependency or scope integrity findings.
 message DiagnosticItem {
   string code = 1;
@@ -341,6 +349,12 @@ message DiagnosticItem {
   ResourceIdentity target = 4;
   repeated string supporting_evidence_ids = 5; // UUIDv4 strings
   string scope = 6;
+  ResourceIdentity referenced_resource = 7;
+  string unresolved_endpoint = 8;
+  DiagnosticRelevance relevance = 9;
+  CompletenessStatus completeness_impact = 10;
+  string first_observed_at = 11;
+  string last_observed_at = 12;
 }
 
 // Response from AnswerEngine containing structured, explainable impact facts.
@@ -382,6 +396,12 @@ message LoadStateRequest {
 
   // Evidence observations supporting the relationships.
   repeated Evidence evidence = 4;
+
+  // Directly observed resources in authoritative state.
+  repeated ResourceIdentity observed_resources = 5;
+
+  // Diagnostics affecting workspace or graph entities.
+  repeated DiagnosticItem diagnostics = 6;
 }
 
 // Response acknowledging state loading into the Core Engine.

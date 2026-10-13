@@ -413,8 +413,176 @@ pub fn change_assessment_to_proto(ca: &ChangeAssessment) -> proto::ChangeAssessm
     }
 }
 
+/// Convert domain `AnalysisCompleteness` to protobuf `AnalysisCompleteness`.
+pub fn completeness_to_proto(
+    c: &wb_core_engine::diagnostic::AnalysisCompleteness,
+) -> proto::AnalysisCompleteness {
+    let status = match c.status {
+        wb_core_engine::diagnostic::CompletenessStatus::Complete => {
+            proto::CompletenessStatus::Complete as i32
+        }
+        wb_core_engine::diagnostic::CompletenessStatus::Partial => {
+            proto::CompletenessStatus::Partial as i32
+        }
+        wb_core_engine::diagnostic::CompletenessStatus::Degraded => {
+            proto::CompletenessStatus::Degraded as i32
+        }
+    };
+    proto::AnalysisCompleteness {
+        is_complete: c.is_complete,
+        status,
+        reasons: c.reasons.clone(),
+    }
+}
+
+/// Convert domain `Diagnostic` to protobuf `DiagnosticItem`.
+pub fn diagnostic_to_proto(d: &wb_core_engine::diagnostic::Diagnostic) -> proto::DiagnosticItem {
+    let severity = match d.severity {
+        wb_core_engine::diagnostic::DiagnosticSeverity::Info => {
+            proto::DiagnosticSeverity::Info as i32
+        }
+        wb_core_engine::diagnostic::DiagnosticSeverity::Warning => {
+            proto::DiagnosticSeverity::Warning as i32
+        }
+        wb_core_engine::diagnostic::DiagnosticSeverity::Error => {
+            proto::DiagnosticSeverity::Error as i32
+        }
+    };
+    let relevance = match d.relevance {
+        wb_core_engine::diagnostic::DiagnosticRelevance::Target => {
+            proto::DiagnosticRelevance::Target as i32
+        }
+        wb_core_engine::diagnostic::DiagnosticRelevance::BlastRadius => {
+            proto::DiagnosticRelevance::BlastRadius as i32
+        }
+        wb_core_engine::diagnostic::DiagnosticRelevance::Workspace => {
+            proto::DiagnosticRelevance::Workspace as i32
+        }
+    };
+    let completeness_impact = match d.completeness_impact {
+        wb_core_engine::diagnostic::CompletenessStatus::Complete => {
+            proto::CompletenessStatus::Complete as i32
+        }
+        wb_core_engine::diagnostic::CompletenessStatus::Partial => {
+            proto::CompletenessStatus::Partial as i32
+        }
+        wb_core_engine::diagnostic::CompletenessStatus::Degraded => {
+            proto::CompletenessStatus::Degraded as i32
+        }
+    };
+    proto::DiagnosticItem {
+        code: d.code.clone(),
+        severity,
+        message: d.message.clone(),
+        target: d.target.as_ref().map(resource_identity_to_proto),
+        supporting_evidence_ids: d
+            .supporting_evidence_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect(),
+        scope: d.scope.clone().unwrap_or_default(),
+        referenced_resource: d.referenced_resource.as_ref().map(resource_identity_to_proto),
+        unresolved_endpoint: d.unresolved_endpoint.clone().unwrap_or_default(),
+        relevance,
+        completeness_impact,
+        first_observed_at: d.first_observed_at.clone().unwrap_or_default(),
+        last_observed_at: d.last_observed_at.clone().unwrap_or_default(),
+    }
+}
+
+/// Convert protobuf `DiagnosticItem` to domain `Diagnostic`.
+pub fn proto_to_diagnostic(
+    p: proto::DiagnosticItem,
+) -> Result<wb_core_engine::diagnostic::Diagnostic, Status> {
+    let severity = match proto::DiagnosticSeverity::try_from(p.severity) {
+        Ok(proto::DiagnosticSeverity::Info) => wb_core_engine::diagnostic::DiagnosticSeverity::Info,
+        Ok(proto::DiagnosticSeverity::Warning) => {
+            wb_core_engine::diagnostic::DiagnosticSeverity::Warning
+        }
+        Ok(proto::DiagnosticSeverity::Error) => {
+            wb_core_engine::diagnostic::DiagnosticSeverity::Error
+        }
+        _ => wb_core_engine::diagnostic::DiagnosticSeverity::Warning,
+    };
+    let relevance = match proto::DiagnosticRelevance::try_from(p.relevance) {
+        Ok(proto::DiagnosticRelevance::Target) => {
+            wb_core_engine::diagnostic::DiagnosticRelevance::Target
+        }
+        Ok(proto::DiagnosticRelevance::BlastRadius) => {
+            wb_core_engine::diagnostic::DiagnosticRelevance::BlastRadius
+        }
+        Ok(proto::DiagnosticRelevance::Workspace) => {
+            wb_core_engine::diagnostic::DiagnosticRelevance::Workspace
+        }
+        _ => wb_core_engine::diagnostic::DiagnosticRelevance::Workspace,
+    };
+    let completeness_impact = match proto::CompletenessStatus::try_from(p.completeness_impact) {
+        Ok(proto::CompletenessStatus::Complete) => {
+            wb_core_engine::diagnostic::CompletenessStatus::Complete
+        }
+        Ok(proto::CompletenessStatus::Partial) => {
+            wb_core_engine::diagnostic::CompletenessStatus::Partial
+        }
+        Ok(proto::CompletenessStatus::Degraded) => {
+            wb_core_engine::diagnostic::CompletenessStatus::Degraded
+        }
+        _ => wb_core_engine::diagnostic::CompletenessStatus::Partial,
+    };
+
+    let target = p.target.map(proto_to_resource_identity).transpose()?;
+    let referenced_resource = p
+        .referenced_resource
+        .map(proto_to_resource_identity)
+        .transpose()?;
+
+    let mut supporting_evidence_ids = Vec::with_capacity(p.supporting_evidence_ids.len());
+    for s in p.supporting_evidence_ids {
+        if let Ok(id) = serde_json::from_str(&format!("\"{}\"", s)) {
+            supporting_evidence_ids.push(id);
+        }
+    }
+
+    let unresolved_endpoint = if p.unresolved_endpoint.is_empty() {
+        None
+    } else {
+        Some(p.unresolved_endpoint)
+    };
+    let scope = if p.scope.is_empty() {
+        None
+    } else {
+        Some(p.scope)
+    };
+    let first_observed_at = if p.first_observed_at.is_empty() {
+        None
+    } else {
+        Some(p.first_observed_at)
+    };
+    let last_observed_at = if p.last_observed_at.is_empty() {
+        None
+    } else {
+        Some(p.last_observed_at)
+    };
+
+    Ok(wb_core_engine::diagnostic::Diagnostic::new(
+        p.code,
+        severity,
+        p.message,
+        target,
+        referenced_resource,
+        unresolved_endpoint,
+        scope,
+        supporting_evidence_ids,
+        relevance,
+        completeness_impact,
+        first_observed_at,
+        last_observed_at,
+    ))
+}
+
 /// Convert domain `ImpactAnswer` to protobuf `AnalyzeImpactResponse`.
 pub fn impact_answer_to_proto(ans: ImpactAnswer) -> proto::AnalyzeImpactResponse {
+    let completeness = Some(completeness_to_proto(&ans.completeness));
+    let diagnostics = ans.diagnostics.iter().map(diagnostic_to_proto).collect();
     proto::AnalyzeImpactResponse {
         target: Some(resource_identity_to_proto(&ans.target)),
         summary: Some(impact_summary_to_proto(&ans.summary)),
@@ -439,7 +607,7 @@ pub fn impact_answer_to_proto(ans: ImpactAnswer) -> proto::AnalyzeImpactResponse
             .change_assessment
             .as_ref()
             .map(change_assessment_to_proto),
-        completeness: None,
-        diagnostics: Vec::new(),
+        completeness,
+        diagnostics,
     }
 }

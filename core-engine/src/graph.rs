@@ -44,6 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::diagnostic::Diagnostic;
 use crate::relationship::Relationship;
 use crate::resource::ResourceIdentity;
 
@@ -95,12 +96,18 @@ fn cmp_relationship(a: &Relationship, b: &Relationship) -> std::cmp::Ordering {
 pub struct Graph {
     /// Set of all known resource identities in the graph.
     resources: HashSet<ResourceIdentity>,
+    /// Set of directly observed resources in authoritative state.
+    observed_resources: HashSet<ResourceIdentity>,
+    /// Flag indicating whether observation status has been explicitly tracked.
+    observation_tracking: bool,
     /// Outgoing index: source -> set of relationships originating from source.
     outgoing: HashMap<ResourceIdentity, HashSet<Relationship>>,
     /// Incoming index: target -> set of relationships pointing to target.
     incoming: HashMap<ResourceIdentity, HashSet<Relationship>>,
     /// Total count of distinct relationships stored in the graph.
     relationship_count: usize,
+    /// Diagnostics affecting the graph.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Default for Graph {
@@ -114,17 +121,42 @@ impl Graph {
     pub fn new() -> Self {
         Self {
             resources: HashSet::new(),
+            observed_resources: HashSet::new(),
+            observation_tracking: false,
             outgoing: HashMap::new(),
             incoming: HashMap::new(),
             relationship_count: 0,
+            diagnostics: Vec::new(),
         }
     }
 
-    /// Add a resource identity to the graph.
+    /// Add a directly observed resource identity to the graph.
+    pub fn add_observed_resource(&mut self, resource: ResourceIdentity) -> bool {
+        self.observation_tracking = true;
+        self.resources.insert(resource.clone());
+        self.observed_resources.insert(resource)
+    }
+
+    /// Enable or disable explicit observation tracking.
+    pub fn set_observation_tracking(&mut self, tracking: bool) {
+        self.observation_tracking = tracking;
+    }
+
+    /// Check whether explicit observation tracking is enabled on this graph.
+    pub fn has_observation_tracking(&self) -> bool {
+        self.observation_tracking
+    }
+
+    /// Add a resource identity to the graph, marking it as directly observed.
     ///
     /// Returns `true` if the resource was newly added, or `false` if it was already
     /// present (idempotent no-op).
     pub fn add_resource(&mut self, resource: ResourceIdentity) -> bool {
+        self.add_observed_resource(resource)
+    }
+
+    /// Add an unverified / unobserved endpoint resource to the graph nodes.
+    pub fn add_referenced_endpoint(&mut self, resource: ResourceIdentity) -> bool {
         self.resources.insert(resource)
     }
 
@@ -174,6 +206,7 @@ impl Graph {
     ///
     /// Returns `true` if the resource was removed, or `false` if it was not found.
     pub fn remove_resource(&mut self, resource: &ResourceIdentity) -> bool {
+        self.observed_resources.remove(resource);
         if !self.resources.remove(resource) {
             return false;
         }
@@ -337,6 +370,49 @@ impl Graph {
         list
     }
 
+    /// Check if a resource identity is a verified observed resource.
+    pub fn is_observed(&self, resource: &ResourceIdentity) -> bool {
+        if self.observation_tracking {
+            self.observed_resources.contains(resource)
+        } else {
+            self.resources.contains(resource)
+        }
+    }
+
+    /// Return all verified directly observed resource identities in the graph, in deterministic sorted order.
+    pub fn observed_resources(&self) -> Vec<ResourceIdentity> {
+        let mut list: Vec<ResourceIdentity> = self.observed_resources.iter().cloned().collect();
+        list.sort_by(cmp_resource_identity);
+        list
+    }
+
+    /// Return all unobserved endpoint resources referenced in relationships, in deterministic sorted order.
+    pub fn unobserved_endpoints(&self) -> Vec<ResourceIdentity> {
+        let mut list: Vec<ResourceIdentity> = self
+            .resources
+            .iter()
+            .filter(|r| !self.is_observed(r))
+            .cloned()
+            .collect();
+        list.sort_by(cmp_resource_identity);
+        list
+    }
+
+    /// Add a diagnostic to the graph.
+    pub fn add_diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Set diagnostics on the graph.
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        self.diagnostics = diagnostics;
+    }
+
+    /// Return all diagnostics associated with this graph.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
     /// Return all relationships in the graph, in deterministic sorted order.
     pub fn relationships(&self) -> Vec<Relationship> {
         let mut list: Vec<Relationship> = self
@@ -351,9 +427,12 @@ impl Graph {
     /// Clear all resources and relationships from the graph.
     pub fn clear(&mut self) {
         self.resources.clear();
+        self.observed_resources.clear();
+        self.observation_tracking = false;
         self.outgoing.clear();
         self.incoming.clear();
         self.relationship_count = 0;
+        self.diagnostics.clear();
     }
 
     /// Verify internal consistency invariants of the graph data structure.

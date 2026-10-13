@@ -89,16 +89,41 @@ type ExplanationFact struct {
 	EvidenceIDs   []string             `json:"evidence_ids"`
 }
 
+// AnalysisCompleteness describes whether the impact analysis is complete, partial, or degraded.
+type AnalysisCompleteness struct {
+	IsComplete bool     `json:"is_complete"`
+	Status     string   `json:"status"`
+	Reasons    []string `json:"reasons,omitempty"`
+}
+
+// DiagnosticItem represents an operational or completeness diagnostic affecting an impact analysis.
+type DiagnosticItem struct {
+	Code               string            `json:"code"`
+	Severity           string            `json:"severity"`
+	Message            string            `json:"message"`
+	Subject            *ResourceIdentity `json:"subject,omitempty"`
+	ReferencedResource *ResourceIdentity `json:"referenced_resource,omitempty"`
+	UnresolvedEndpoint string            `json:"unresolved_endpoint,omitempty"`
+	Scope              string            `json:"scope,omitempty"`
+	EvidenceIDs        []string          `json:"evidence_ids,omitempty"`
+	Relevance          string            `json:"relevance,omitempty"`
+	CompletenessImpact string            `json:"completeness_impact,omitempty"`
+	FirstObservedAt    string            `json:"first_observed_at,omitempty"`
+	LastObservedAt     string            `json:"last_observed_at,omitempty"`
+}
+
 // ImpactAnswer is the complete deterministic, explainable answer returned by the Answer Engine.
 type ImpactAnswer struct {
-	Target            ResourceIdentity     `json:"target"`
-	Summary           ImpactSummary        `json:"summary"`
-	ImpactedResources []ImpactedResource   `json:"impacted_resources"`
-	Relationships     []AnswerRelationship `json:"relationships"`
-	Paths             []ImpactPath         `json:"paths"`
-	Evidence          []AnswerEvidence     `json:"evidence"`
-	ExplanationFacts  []ExplanationFact    `json:"explanation_facts"`
-	ChangeAssessment  *ChangeAssessment    `json:"change_assessment,omitempty"`
+	Target            ResourceIdentity      `json:"target"`
+	Summary           ImpactSummary         `json:"summary"`
+	ImpactedResources []ImpactedResource    `json:"impacted_resources"`
+	Relationships     []AnswerRelationship  `json:"relationships"`
+	Paths             []ImpactPath          `json:"paths"`
+	Evidence          []AnswerEvidence      `json:"evidence"`
+	ExplanationFacts  []ExplanationFact     `json:"explanation_facts"`
+	ChangeAssessment  *ChangeAssessment     `json:"change_assessment,omitempty"`
+	Completeness      *AnalysisCompleteness `json:"completeness,omitempty"`
+	Diagnostics       []DiagnosticItem      `json:"diagnostics,omitempty"`
 }
 
 // ImpactRequest defines the incoming payload for impact analysis.

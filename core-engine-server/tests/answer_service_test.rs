@@ -122,6 +122,8 @@ async fn test_rpc_materialized_empty_workspace_returns_empty_answer() {
         relationships: vec![],
         associations: vec![],
         evidence: vec![],
+        observed_resources: vec![],
+        diagnostics: vec![],
     });
     svc.load_state(load_req).await.unwrap();
 
@@ -262,6 +264,11 @@ async fn test_rpc_load_state_and_workspace_isolation() {
         relationships: vec![rel],
         associations: vec![assoc],
         evidence: vec![ev],
+        observed_resources: vec![
+            proto_identity("kubernetes", "service", "orders"),
+            proto_identity("kubernetes", "service", "catalog"),
+        ],
+        diagnostics: vec![],
     });
 
     let load_resp = answer_svc.load_state(load_req).await.unwrap().into_inner();
@@ -300,6 +307,8 @@ async fn test_rpc_load_state_and_workspace_isolation() {
         relationships: vec![],
         associations: vec![],
         evidence: vec![],
+        observed_resources: vec![],
+        diagnostics: vec![],
     });
     answer_svc.load_state(load_req_b).await.unwrap();
 
@@ -359,6 +368,12 @@ async fn test_rpc_change_aware_delete_vs_update() {
         relationships: vec![rel1, rel2],
         associations: vec![],
         evidence: vec![],
+        observed_resources: vec![
+            proto_identity("kubernetes", "service", "frontend"),
+            proto_identity("kubernetes", "service", "api"),
+            proto_identity("kubernetes", "service", "db"),
+        ],
+        diagnostics: vec![],
     });
     answer_svc.load_state(load_req).await.unwrap();
 

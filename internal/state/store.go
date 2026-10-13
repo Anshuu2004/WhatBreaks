@@ -82,4 +82,19 @@ type Store interface {
 
 	// ListStaleRunAudits returns all stale run audit records for a workspace.
 	ListStaleRunAudits(ctx context.Context, workspaceID string) ([]StaleRunAudit, error)
+
+	// ListDiagnostics returns all active diagnostics for a workspace.
+	ListDiagnostics(ctx context.Context, workspaceID string) ([]DiagnosticItem, error)
+
+	// SaveDiagnostics persists or updates diagnostics for a workspace.
+	SaveDiagnostics(ctx context.Context, workspaceID string, diagnostics []DiagnosticItem) error
+
+	// SaveScopeSweep persists scope sweep completeness metadata.
+	SaveScopeSweep(ctx context.Context, sweep ScopeSweep) error
+
+	// GetScopeSweep retrieves a scope sweep record by workspace, cluster, and run IDs.
+	GetScopeSweep(ctx context.Context, workspaceID string, clusterID string, runID string) (*ScopeSweep, error)
+
+	// ListScopeSweeps lists historical scope sweep records for a workspace.
+	ListScopeSweeps(ctx context.Context, workspaceID string) ([]ScopeSweep, error)
 }

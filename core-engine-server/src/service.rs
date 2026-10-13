@@ -99,8 +99,8 @@ use wb_core_proto::core_v1::{
 };
 
 use crate::convert::{
-    impact_answer_to_proto, proto_to_answer_request, proto_to_relationship,
-    proto_to_relationship_evidence,
+    impact_answer_to_proto, proto_to_answer_request, proto_to_diagnostic, proto_to_relationship,
+    proto_to_relationship_evidence, proto_to_resource_identity,
 };
 
 /// Tenant state encapsulating the authoritative Graph, ProvenanceStore, and Evidence.
@@ -245,6 +245,16 @@ impl AnswerService for AnswerServiceImpl {
 
         let mut graph = Graph::new();
         let mut provenance = ProvenanceStore::new();
+
+        for res_proto in req.observed_resources {
+            let res = proto_to_resource_identity(res_proto)?;
+            graph.add_observed_resource(res);
+        }
+
+        for diag_proto in req.diagnostics {
+            let diag = proto_to_diagnostic(diag_proto)?;
+            graph.add_diagnostic(diag);
+        }
 
         let mut rel_count = 0u32;
         for rel_proto in req.relationships {

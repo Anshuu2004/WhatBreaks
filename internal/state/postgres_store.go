@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -103,6 +104,47 @@ func EnsureSchema(ctx context.Context, db database.DB) error {
 		status TEXT NOT NULL,
 		reason TEXT NOT NULL,
 		observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS state_diagnostics (
+		workspace_id TEXT NOT NULL,
+		code TEXT NOT NULL,
+		subject_provider TEXT NOT NULL DEFAULT '',
+		subject_resource_type TEXT NOT NULL DEFAULT '',
+		subject_provider_id TEXT NOT NULL DEFAULT '',
+		referenced_provider TEXT NOT NULL DEFAULT '',
+		referenced_resource_type TEXT NOT NULL DEFAULT '',
+		referenced_provider_id TEXT NOT NULL DEFAULT '',
+		unresolved_endpoint TEXT NOT NULL DEFAULT '',
+		scope TEXT NOT NULL DEFAULT '',
+		severity TEXT NOT NULL,
+		message TEXT NOT NULL,
+		relevance TEXT NOT NULL,
+		completeness_impact TEXT NOT NULL,
+		supporting_evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+		first_observed_at TIMESTAMPTZ NOT NULL,
+		last_observed_at TIMESTAMPTZ NOT NULL,
+		resolved BOOLEAN NOT NULL DEFAULT FALSE,
+		resolved_at TIMESTAMPTZ,
+		PRIMARY KEY (workspace_id, code, subject_provider, subject_resource_type, subject_provider_id, referenced_provider, referenced_resource_type, referenced_provider_id, unresolved_endpoint, scope)
+	);
+
+	ALTER TABLE state_diagnostics ADD COLUMN IF NOT EXISTS resolved BOOLEAN NOT NULL DEFAULT FALSE;
+	ALTER TABLE state_diagnostics ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+
+	CREATE TABLE IF NOT EXISTS state_scope_sweeps (
+		workspace_id TEXT NOT NULL,
+		cluster_id TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		sampling_started_at TIMESTAMPTZ NOT NULL,
+		generation BIGINT NOT NULL DEFAULT 0,
+		successful_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+		failed_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+		required_failures JSONB NOT NULL DEFAULT '[]'::jsonb,
+		optional_failures JSONB NOT NULL DEFAULT '[]'::jsonb,
+		scope_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+		observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (workspace_id, cluster_id, run_id)
 	);
 	`
 	_, err := db.Exec(ctx, schema)
@@ -266,6 +308,188 @@ func saveConflictsTx(ctx context.Context, tx database.Tx, ws string, conflicts [
 		}
 	}
 	return nil
+}
+
+func saveDiagnosticsTx(ctx context.Context, tx database.Tx, ws string, diagnostics []DiagnosticItem) error {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+
+	query := `
+	INSERT INTO state_diagnostics (
+		workspace_id, code,
+		subject_provider, subject_resource_type, subject_provider_id,
+		referenced_provider, referenced_resource_type, referenced_provider_id,
+		unresolved_endpoint, scope,
+		severity, message, relevance, completeness_impact,
+		supporting_evidence_ids, first_observed_at, last_observed_at,
+		resolved, resolved_at
+	) VALUES (
+		$1, $2,
+		$3, $4, $5,
+		$6, $7, $8,
+		$9, $10,
+		$11, $12, $13, $14,
+		$15, $16, $17,
+		FALSE, NULL
+	)
+	ON CONFLICT (workspace_id, code, subject_provider, subject_resource_type, subject_provider_id, referenced_provider, referenced_resource_type, referenced_provider_id, unresolved_endpoint, scope)
+	DO UPDATE SET
+		last_observed_at = GREATEST(state_diagnostics.last_observed_at, EXCLUDED.last_observed_at),
+		severity = EXCLUDED.severity,
+		message = EXCLUDED.message,
+		relevance = EXCLUDED.relevance,
+		completeness_impact = EXCLUDED.completeness_impact,
+		supporting_evidence_ids = COALESCE((
+			SELECT jsonb_agg(DISTINCT elem ORDER BY elem)
+			FROM jsonb_array_elements_text(state_diagnostics.supporting_evidence_ids || EXCLUDED.supporting_evidence_ids) AS elem
+		), '[]'::jsonb),
+		resolved = FALSE,
+		resolved_at = NULL;
+	`
+
+	for _, d := range diagnostics {
+		subP, subRT, subPID := "", "", ""
+		if d.Subject != nil {
+			subP, subRT, subPID = d.Subject.Provider, d.Subject.ResourceType, d.Subject.ProviderID
+		}
+		refP, refRT, refPID := "", "", ""
+		if d.ReferencedResource != nil {
+			refP, refRT, refPID = d.ReferencedResource.Provider, d.ReferencedResource.ResourceType, d.ReferencedResource.ProviderID
+		}
+
+		evIDs := d.EvidenceIDs
+		if evIDs == nil {
+			evIDs = []string{}
+		}
+		evIDsJSON, err := json.Marshal(evIDs)
+		if err != nil {
+			evIDsJSON = []byte("[]")
+		}
+
+		firstAt := d.FirstObservedAt
+		if firstAt.IsZero() {
+			firstAt = time.Now().UTC()
+		}
+		lastAt := d.LastObservedAt
+		if lastAt.IsZero() {
+			lastAt = firstAt
+		}
+
+		_, err = tx.Exec(ctx, query,
+			ws, d.Code,
+			subP, subRT, subPID,
+			refP, refRT, refPID,
+			d.UnresolvedEndpoint, d.Scope,
+			d.Severity, d.Message, d.Relevance, d.CompletenessImpact,
+			evIDsJSON, firstAt, lastAt,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to save diagnostic %s: %w", d.NaturalKey(), err)
+		}
+	}
+	return nil
+}
+
+func resolveDiagnosticsTx(ctx context.Context, tx database.Tx, ws string, resources []Resource, sweep *ScopeSweep) error {
+	// T5: If the collection run has failed scopes, existing diagnostics are NOT resolved.
+	if sweep != nil && len(sweep.FailedScopes) > 0 {
+		return nil
+	}
+
+	// 1. Resolve UNRESOLVED_REFERENCE diagnostics for any directly observed resource
+	for _, res := range resources {
+		query := `
+		UPDATE state_diagnostics
+		SET resolved = TRUE, resolved_at = NOW()
+		WHERE workspace_id = $1
+		  AND code = 'UNRESOLVED_REFERENCE'
+		  AND referenced_provider = $2
+		  AND referenced_resource_type = $3
+		  AND referenced_provider_id = $4
+		  AND resolved = FALSE;
+		`
+		if _, err := tx.Exec(ctx, query, ws, res.Identity.Provider, res.Identity.ResourceType, res.Identity.ProviderID); err != nil {
+			return fmt.Errorf("failed to resolve UNRESOLVED_REFERENCE for %s: %w", res.Identity, err)
+		}
+	}
+
+	// 2. Resolve INCOMPLETE_SCOPE diagnostics for any successful scope
+	if sweep != nil {
+		for _, scope := range sweep.SuccessfulScopes {
+			query := `
+			UPDATE state_diagnostics
+			SET resolved = TRUE, resolved_at = NOW()
+			WHERE workspace_id = $1
+			  AND code = 'INCOMPLETE_SCOPE'
+			  AND scope = $2
+			  AND resolved = FALSE;
+			`
+			if _, err := tx.Exec(ctx, query, ws, scope); err != nil {
+				return fmt.Errorf("failed to resolve INCOMPLETE_SCOPE for %s: %w", scope, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func saveScopeSweepTx(ctx context.Context, tx database.Tx, ws string, sweep *ScopeSweep) error {
+	if sweep == nil {
+		return nil
+	}
+	succ := sweep.SuccessfulScopes
+	if succ == nil {
+		succ = []string{}
+	}
+	fail := sweep.FailedScopes
+	if fail == nil {
+		fail = []string{}
+	}
+	reqFail := sweep.RequiredFailures
+	if reqFail == nil {
+		reqFail = []string{}
+	}
+	optFail := sweep.OptionalFailures
+	if optFail == nil {
+		optFail = []string{}
+	}
+	errs := sweep.ScopeErrors
+	if errs == nil {
+		errs = map[string]string{}
+	}
+
+	succJSON, _ := json.Marshal(succ)
+	failJSON, _ := json.Marshal(fail)
+	reqFailJSON, _ := json.Marshal(reqFail)
+	optFailJSON, _ := json.Marshal(optFail)
+	errsJSON, _ := json.Marshal(errs)
+
+	obsAt := sweep.ObservedAt
+	if obsAt.IsZero() {
+		obsAt = time.Now().UTC()
+	}
+
+	query := `
+	INSERT INTO state_scope_sweeps (
+		workspace_id, cluster_id, run_id, sampling_started_at, generation,
+		successful_scopes, failed_scopes, required_failures, optional_failures, scope_errors, observed_at
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	ON CONFLICT (workspace_id, cluster_id, run_id)
+	DO UPDATE SET
+		generation = EXCLUDED.generation,
+		successful_scopes = EXCLUDED.successful_scopes,
+		failed_scopes = EXCLUDED.failed_scopes,
+		required_failures = EXCLUDED.required_failures,
+		optional_failures = EXCLUDED.optional_failures,
+		scope_errors = EXCLUDED.scope_errors,
+		observed_at = EXCLUDED.observed_at;
+	`
+	_, err := tx.Exec(ctx, query,
+		ws, sweep.ClusterID, sweep.RunID, sweep.SamplingStartedAt, sweep.Generation,
+		succJSON, failJSON, reqFailJSON, optFailJSON, errsJSON, obsAt,
+	)
+	return err
 }
 
 func (s *PostgresStore) SaveResources(ctx context.Context, workspaceID string, resources []Resource) error {
@@ -515,6 +739,18 @@ func (s *PostgresStore) ReconcileAuthoritativeBatch(ctx context.Context, params 
 		result.ProvenanceLinksAdded = len(params.Provenance)
 
 		if err := saveConflictsTx(ctx, tx, ws, params.Conflicts); err != nil {
+			return err
+		}
+
+		if err := saveDiagnosticsTx(ctx, tx, ws, params.Diagnostics); err != nil {
+			return err
+		}
+
+		if err := resolveDiagnosticsTx(ctx, tx, ws, params.Resources, params.ScopeSweep); err != nil {
+			return err
+		}
+
+		if err := saveScopeSweepTx(ctx, tx, ws, params.ScopeSweep); err != nil {
 			return err
 		}
 
@@ -848,12 +1084,18 @@ func (s *PostgresStore) LoadAssembledState(ctx context.Context, workspaceID stri
 		sort.Strings(prov[k])
 	}
 
+	diagnostics, err := s.ListDiagnostics(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+
 	return &AssembledState{
 		WorkspaceID:   ws,
 		Resources:     resources,
 		Relationships: relationships,
 		Evidence:      evidence,
 		Provenance:    prov,
+		Diagnostics:   diagnostics,
 	}, nil
 }
 
@@ -864,7 +1106,11 @@ func (s *PostgresStore) DeleteWorkspaceState(ctx context.Context, workspaceID st
 	}
 
 	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		tables := []string{"state_conflicts", "state_provenance", "state_relationships", "state_evidence", "state_resources", "state_reconciliation_audit", "state_workspace_authority"}
+		tables := []string{
+			"state_conflicts", "state_provenance", "state_relationships",
+			"state_evidence", "state_resources", "state_reconciliation_audit",
+			"state_workspace_authority", "state_diagnostics", "state_scope_sweeps",
+		}
 		for _, t := range tables {
 			if _, err := tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE workspace_id = $1", t), ws); err != nil {
 				return err
@@ -872,6 +1118,167 @@ func (s *PostgresStore) DeleteWorkspaceState(ctx context.Context, workspaceID st
 		}
 		return nil
 	})
+}
+
+func (s *PostgresStore) ListDiagnostics(ctx context.Context, workspaceID string) ([]DiagnosticItem, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	query := `
+	SELECT code, severity, message,
+	       subject_provider, subject_resource_type, subject_provider_id,
+	       referenced_provider, referenced_resource_type, referenced_provider_id,
+	       unresolved_endpoint, scope, relevance, completeness_impact,
+	       supporting_evidence_ids, first_observed_at, last_observed_at, resolved, resolved_at
+	FROM state_diagnostics
+	WHERE workspace_id = $1 AND resolved = FALSE
+	ORDER BY code ASC, subject_provider ASC, subject_resource_type ASC, subject_provider_id ASC,
+	         referenced_provider ASC, referenced_resource_type ASC, referenced_provider_id ASC,
+	         unresolved_endpoint ASC, scope ASC;
+	`
+	rows, err := s.db.Query(ctx, query, ws)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list diagnostics: %w", err)
+	}
+	defer rows.Close()
+
+	var diagnostics []DiagnosticItem
+	for rows.Next() {
+		var d DiagnosticItem
+		d.WorkspaceID = ws
+		var subP, subRT, subPID, refP, refRT, refPID string
+		var evIDsJSON []byte
+		var resAt *time.Time
+		if err := rows.Scan(
+			&d.Code, &d.Severity, &d.Message,
+			&subP, &subRT, &subPID,
+			&refP, &refRT, &refPID,
+			&d.UnresolvedEndpoint, &d.Scope, &d.Relevance, &d.CompletenessImpact,
+			&evIDsJSON, &d.FirstObservedAt, &d.LastObservedAt, &d.Resolved, &resAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan diagnostic: %w", err)
+		}
+		d.ResolvedAt = resAt
+		if subP != "" || subRT != "" || subPID != "" {
+			d.Subject = &ResourceIdentity{Provider: subP, ResourceType: subRT, ProviderID: subPID}
+		}
+		if refP != "" || refRT != "" || refPID != "" {
+			d.ReferencedResource = &ResourceIdentity{Provider: refP, ResourceType: refRT, ProviderID: refPID}
+		}
+		if len(evIDsJSON) > 0 {
+			_ = json.Unmarshal(evIDsJSON, &d.EvidenceIDs)
+		}
+		if d.EvidenceIDs == nil {
+			d.EvidenceIDs = []string{}
+		}
+		sort.Strings(d.EvidenceIDs)
+		diagnostics = append(diagnostics, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading diagnostic rows: %w", err)
+	}
+	if diagnostics == nil {
+		diagnostics = []DiagnosticItem{}
+	}
+	return diagnostics, nil
+}
+
+func (s *PostgresStore) SaveDiagnostics(ctx context.Context, workspaceID string, diagnostics []DiagnosticItem) error {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return ErrInvalidWorkspace
+	}
+	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
+		return saveDiagnosticsTx(ctx, tx, ws, diagnostics)
+	})
+}
+
+func (s *PostgresStore) SaveScopeSweep(ctx context.Context, sweep ScopeSweep) error {
+	ws := strings.TrimSpace(sweep.WorkspaceID)
+	if ws == "" {
+		return ErrInvalidWorkspace
+	}
+	return s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
+		return saveScopeSweepTx(ctx, tx, ws, &sweep)
+	})
+}
+
+func (s *PostgresStore) GetScopeSweep(ctx context.Context, workspaceID string, clusterID string, runID string) (*ScopeSweep, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	cid := strings.TrimSpace(clusterID)
+	if cid == "" {
+		cid = "default"
+	}
+	query := `
+	SELECT workspace_id, cluster_id, run_id, sampling_started_at, generation,
+	       successful_scopes, failed_scopes, required_failures, optional_failures, scope_errors, observed_at
+	FROM state_scope_sweeps
+	WHERE workspace_id = $1 AND cluster_id = $2 AND run_id = $3;
+	`
+	var sweep ScopeSweep
+	var succJSON, failJSON, reqJSON, optJSON, errsJSON []byte
+	err := s.db.QueryRow(ctx, query, ws, cid, runID).Scan(
+		&sweep.WorkspaceID, &sweep.ClusterID, &sweep.RunID, &sweep.SamplingStartedAt, &sweep.Generation,
+		&succJSON, &failJSON, &reqJSON, &optJSON, &errsJSON, &sweep.ObservedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(succJSON, &sweep.SuccessfulScopes)
+	_ = json.Unmarshal(failJSON, &sweep.FailedScopes)
+	_ = json.Unmarshal(reqJSON, &sweep.RequiredFailures)
+	_ = json.Unmarshal(optJSON, &sweep.OptionalFailures)
+	_ = json.Unmarshal(errsJSON, &sweep.ScopeErrors)
+	return &sweep, nil
+}
+
+func (s *PostgresStore) ListScopeSweeps(ctx context.Context, workspaceID string) ([]ScopeSweep, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	query := `
+	SELECT workspace_id, cluster_id, run_id, sampling_started_at, generation,
+	       successful_scopes, failed_scopes, required_failures, optional_failures, scope_errors, observed_at
+	FROM state_scope_sweeps
+	WHERE workspace_id = $1
+	ORDER BY observed_at ASC;
+	`
+	rows, err := s.db.Query(ctx, query, ws)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list scope sweeps: %w", err)
+	}
+	defer rows.Close()
+
+	var sweeps []ScopeSweep
+	for rows.Next() {
+		var sweep ScopeSweep
+		var succJSON, failJSON, reqJSON, optJSON, errsJSON []byte
+		if err := rows.Scan(
+			&sweep.WorkspaceID, &sweep.ClusterID, &sweep.RunID, &sweep.SamplingStartedAt, &sweep.Generation,
+			&succJSON, &failJSON, &reqJSON, &optJSON, &errsJSON, &sweep.ObservedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan scope sweep: %w", err)
+		}
+		_ = json.Unmarshal(succJSON, &sweep.SuccessfulScopes)
+		_ = json.Unmarshal(failJSON, &sweep.FailedScopes)
+		_ = json.Unmarshal(reqJSON, &sweep.RequiredFailures)
+		_ = json.Unmarshal(optJSON, &sweep.OptionalFailures)
+		_ = json.Unmarshal(errsJSON, &sweep.ScopeErrors)
+		sweeps = append(sweeps, sweep)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading scope sweep rows: %w", err)
+	}
+	if sweeps == nil {
+		sweeps = []ScopeSweep{}
+	}
+	return sweeps, nil
 }
 
 // ListWorkspaces queries distinct workspace IDs persisted in state_resources, state_relationships,

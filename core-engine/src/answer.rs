@@ -61,6 +61,10 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
+use crate::diagnostic::{
+    diagnostic_code, AnalysisCompleteness, CompletenessStatus, Diagnostic, DiagnosticRelevance,
+    DiagnosticSeverity,
+};
 use crate::evidence::{Evidence, EvidenceId, EvidenceSource, ObservationType};
 use crate::graph::Graph;
 use crate::history::{RelationshipState, RelationshipStateDerivation};
@@ -419,6 +423,10 @@ pub struct ImpactAnswer {
     pub explanation_facts: Vec<ExplanationFact>,
     /// Factual assessment of the proposed change (None for default blast radius).
     pub change_assessment: Option<ChangeAssessment>,
+    /// Structured completeness assessment detailing whether the blast radius is authoritative.
+    pub completeness: AnalysisCompleteness,
+    /// Diagnostics affecting or explaining this impact analysis.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl ImpactAnswer {
@@ -433,6 +441,8 @@ impl ImpactAnswer {
         evidence: Vec<AnswerEvidence>,
         explanation_facts: Vec<ExplanationFact>,
         change_assessment: Option<ChangeAssessment>,
+        completeness: AnalysisCompleteness,
+        diagnostics: Vec<Diagnostic>,
     ) -> Self {
         Self {
             target,
@@ -443,7 +453,30 @@ impl ImpactAnswer {
             evidence,
             explanation_facts,
             change_assessment,
+            completeness,
+            diagnostics,
         }
+    }
+
+    /// Return `true` if analysis completeness status is complete.
+    pub fn is_complete(&self) -> bool {
+        self.completeness.is_complete
+    }
+
+    /// Return all diagnostics with Target relevance.
+    pub fn target_diagnostics(&self) -> Vec<&Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.relevance == DiagnosticRelevance::Target)
+            .collect()
+    }
+
+    /// Return all diagnostics with BlastRadius relevance.
+    pub fn blast_radius_diagnostics(&self) -> Vec<&Diagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.relevance == DiagnosticRelevance::BlastRadius)
+            .collect()
     }
 
     /// Return `true` if no resources were impacted.
@@ -511,8 +544,8 @@ impl AnswerEngine {
         evidence_catalog: &[Evidence],
         request: &AnswerRequest,
     ) -> ImpactAnswer {
-        // 1. Guard against empty graph, unknown target, or zero max_depth
-        if request.max_depth == 0 || !graph.contains_resource(&request.target) {
+        // 1. Guard against empty graph, zero max_depth, or unobserved target
+        if request.max_depth == 0 {
             let change_assessment = request.proposed_change.as_ref().map(|pc| {
                 ChangeAssessment::for_analysis(pc, graph, &request.target, request.direction, 0)
             });
@@ -525,6 +558,8 @@ impl AnswerEngine {
                 Vec::new(),
                 Vec::new(),
                 change_assessment,
+                AnalysisCompleteness::complete(),
+                Vec::new(),
             );
         }
 
@@ -538,6 +573,8 @@ impl AnswerEngine {
             let change_assessment = request.proposed_change.as_ref().map(|pc| {
                 ChangeAssessment::for_analysis(pc, graph, &request.target, request.direction, 0)
             });
+            let (completeness, diagnostics) =
+                Self::derive_completeness_and_diagnostics(graph, &request.target, &[], &[]);
             return ImpactAnswer::new(
                 request.target.clone(),
                 ImpactSummary::default(),
@@ -547,6 +584,8 @@ impl AnswerEngine {
                 Vec::new(),
                 Vec::new(),
                 change_assessment,
+                completeness,
+                diagnostics,
             );
         }
 
@@ -705,6 +744,14 @@ impl AnswerEngine {
             )
         });
 
+        // 9. Derive structured completeness and diagnostics
+        let (completeness, diagnostics) = Self::derive_completeness_and_diagnostics(
+            graph,
+            &request.target,
+            &impacted_resources,
+            &paths,
+        );
+
         ImpactAnswer::new(
             request.target.clone(),
             summary,
@@ -714,7 +761,189 @@ impl AnswerEngine {
             answer_evidence_list,
             explanation_facts,
             change_assessment,
+            completeness,
+            diagnostics,
         )
+    }
+
+    /// Helper to determine if an incomplete discovery scope semantically affects a resource type.
+    /// Used to connect scope completeness to impact analysis and avoid false confidence when
+    /// collection scopes that would have discovered dependencies or endpoints failed.
+    fn scope_affects_resource_type(scope: &str, res_type: &str) -> bool {
+        let s = scope.to_ascii_lowercase();
+        let r = res_type.to_ascii_lowercase();
+
+        // 1. Direct type or plural match
+        if r == s || format!("{r}s") == s || format!("{r}es") == s || s.trim_end_matches('s') == r {
+            return true;
+        }
+
+        // 2. Semantic topology dependencies where a failed scope conceals missing graph edges:
+        match s.as_str() {
+            // EndpointSlices collection failure conceals Service -> Pod routes
+            "endpointslices" | "endpointslice" => r == "service" || r == "pod" || r == "endpointslice",
+            // Ingresses collection failure conceals Ingress -> Service routes
+            "ingresses" | "ingress" => r == "service" || r == "ingress",
+            // Nodes collection failure conceals Node -> Pod containment
+            "nodes" | "node" => r == "pod" || r == "node",
+            // Storage collection failure conceals Pod -> PVC -> PV dependencies
+            "persistentvolumeclaims" | "persistentvolumeclaim" | "pvc" |
+            "persistentvolumes" | "persistentvolume" | "pv" => {
+                r == "pod" || r == "persistentvolumeclaim" || r == "persistentvolume" || r == "pvc" || r == "pv"
+            }
+            // ServiceAccount failure conceals Pod -> ServiceAccount linkage
+            "serviceaccounts" | "serviceaccount" => r == "pod" || r == "serviceaccount",
+            _ => false,
+        }
+    }
+
+    /// Helper to derive query-specific completeness and relevant diagnostics.
+    fn derive_completeness_and_diagnostics(
+        graph: &Graph,
+        target: &ResourceIdentity,
+        impacted_resources: &[ImpactedResource],
+        paths: &[ImpactPath],
+    ) -> (AnalysisCompleteness, Vec<Diagnostic>) {
+        let mut relevant_resources: HashSet<&ResourceIdentity> = HashSet::new();
+        relevant_resources.insert(target);
+        for ir in impacted_resources {
+            relevant_resources.insert(&ir.resource);
+        }
+        for p in paths {
+            for r in &p.resources {
+                relevant_resources.insert(r);
+            }
+        }
+
+        let mut query_diagnostics: Vec<Diagnostic> = Vec::new();
+        let mut seen_keys: HashSet<(String, String, String, String)> = HashSet::new();
+
+        // 0. If target itself is not directly observed, emit UNOBSERVED_TARGET diagnostic
+        if !graph.is_observed(target) {
+            let diag = Diagnostic::unobserved_target(target.clone());
+            let key = (
+                diag.code.clone(),
+                diag.message.clone(),
+                diag.target.as_ref().map(|t| t.provider_id.clone()).unwrap_or_default(),
+                diag.referenced_resource.as_ref().map(|r| r.provider_id.clone()).unwrap_or_default(),
+            );
+            if seen_keys.insert(key) {
+                query_diagnostics.push(diag);
+            }
+        }
+
+        // 1. Check pre-stored diagnostics from graph
+        for diag in graph.diagnostics() {
+            let is_relevant = match diag.relevance {
+                DiagnosticRelevance::Target => {
+                    diag.target.as_ref().is_some_and(|t| t == target)
+                        || diag.referenced_resource.as_ref().is_some_and(|r| r == target)
+                }
+                DiagnosticRelevance::BlastRadius => {
+                    diag.target
+                        .as_ref()
+                        .is_some_and(|t| relevant_resources.contains(t))
+                        || diag
+                            .referenced_resource
+                            .as_ref()
+                            .is_some_and(|r| relevant_resources.contains(r))
+                }
+                DiagnosticRelevance::Workspace => {
+                    if diag.code == diagnostic_code::INCOMPLETE_SCOPE {
+                        if let Some(ref scope) = diag.scope {
+                            relevant_resources.iter().any(|r| {
+                                Self::scope_affects_resource_type(scope, r.resource_type.as_str())
+                            })
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            if is_relevant {
+                let key = (
+                    diag.code.clone(),
+                    diag.message.clone(),
+                    diag.target.as_ref().map(|t| t.provider_id.clone()).unwrap_or_default(),
+                    diag.referenced_resource.as_ref().map(|r| r.provider_id.clone()).unwrap_or_default(),
+                );
+                if seen_keys.insert(key) {
+                    query_diagnostics.push(diag.clone());
+                }
+            }
+        }
+
+        // 2. Check for any unobserved endpoints traversed in paths that lack a stored diagnostic
+        for res in &relevant_resources {
+            if *res != target && !graph.is_observed(res) {
+                let diag = Diagnostic::new(
+                    diagnostic_code::UNRESOLVED_REFERENCE,
+                    DiagnosticSeverity::Warning,
+                    format!(
+                        "Referenced target resource '{}:{}:{}' has not been directly observed",
+                        res.provider, res.resource_type, res.provider_id
+                    ),
+                    Some((*target).clone()),
+                    Some((*res).clone()),
+                    None,
+                    None,
+                    Vec::new(),
+                    DiagnosticRelevance::BlastRadius,
+                    CompletenessStatus::Partial,
+                    None,
+                    None,
+                );
+                let key = (
+                    diag.code.clone(),
+                    diag.message.clone(),
+                    diag.target.as_ref().map(|t| t.provider_id.clone()).unwrap_or_default(),
+                    diag.referenced_resource.as_ref().map(|r| r.provider_id.clone()).unwrap_or_default(),
+                );
+                if seen_keys.insert(key) {
+                    query_diagnostics.push(diag);
+                }
+            }
+        }
+
+        // Sort diagnostics deterministically
+        query_diagnostics.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+
+        // Derive overall completeness status and reasons
+        let mut has_degraded = false;
+        let mut has_partial = false;
+        let mut reasons: Vec<String> = Vec::new();
+        let mut seen_reasons: HashSet<String> = HashSet::new();
+
+        for d in &query_diagnostics {
+            match d.completeness_impact {
+                CompletenessStatus::Degraded => {
+                    has_degraded = true;
+                    if seen_reasons.insert(d.message.clone()) {
+                        reasons.push(d.message.clone());
+                    }
+                }
+                CompletenessStatus::Partial => {
+                    has_partial = true;
+                    if seen_reasons.insert(d.message.clone()) {
+                        reasons.push(d.message.clone());
+                    }
+                }
+                CompletenessStatus::Complete => {}
+            }
+        }
+
+        let status = if has_degraded {
+            CompletenessStatus::Degraded
+        } else if has_partial {
+            CompletenessStatus::Partial
+        } else {
+            CompletenessStatus::Complete
+        };
+
+        (AnalysisCompleteness::new(status, reasons), query_diagnostics)
     }
 
     /// Generate a direction-aware, factually grounded explanation for an impacted resource.

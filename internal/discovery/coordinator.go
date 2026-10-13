@@ -320,6 +320,14 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 	}
 
 	// 7. Stage: Reconciliation & Materialization
+	var scopeErrorsMap map[string]string
+	if len(colResult.ScopeErrors) > 0 {
+		scopeErrorsMap = make(map[string]string, len(colResult.ScopeErrors))
+		for _, se := range colResult.ScopeErrors {
+			scopeErrorsMap[se.Scope] = se.Error
+		}
+	}
+
 	batch := state.ObservationBatch{
 		WorkspaceID:       wsID,
 		ClusterID:         targetCluster,
@@ -331,6 +339,18 @@ func (c *DefaultCoordinator) Discover(ctx context.Context, req SyncRequest) (*Re
 			ScopeType: "cluster",
 			ScopeID:   targetCluster,
 			Complete:  colResult.Complete,
+		},
+		ScopeSweep: &state.ScopeSweep{
+			WorkspaceID:       wsID,
+			ClusterID:         targetCluster,
+			RunID:             runID,
+			SamplingStartedAt: start,
+			SuccessfulScopes:  colResult.SuccessfulScopes,
+			FailedScopes:      colResult.FailedScopes,
+			RequiredFailures:  colResult.RequiredFailures,
+			OptionalFailures:  colResult.OptionalFailures,
+			ScopeErrors:       scopeErrorsMap,
+			ObservedAt:        time.Now().UTC(),
 		},
 	}
 

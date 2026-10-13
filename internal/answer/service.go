@@ -257,6 +257,83 @@ func transformProtoResponse(resp *corev1.AnalyzeImpactResponse) *ImpactAnswer {
 		}
 	}
 
+	var completeness *AnalysisCompleteness
+	if resp.Completeness != nil {
+		statusStr := "COMPLETE"
+		switch resp.Completeness.Status {
+		case corev1.CompletenessStatus_COMPLETENESS_STATUS_PARTIAL:
+			statusStr = "PARTIAL"
+		case corev1.CompletenessStatus_COMPLETENESS_STATUS_DEGRADED:
+			statusStr = "DEGRADED"
+		}
+		completeness = &AnalysisCompleteness{
+			IsComplete: resp.Completeness.IsComplete,
+			Status:     statusStr,
+			Reasons:    copyStringSlice(resp.Completeness.Reasons),
+		}
+	}
+
+	var diagnostics []DiagnosticItem
+	if len(resp.Diagnostics) > 0 {
+		diagnostics = make([]DiagnosticItem, 0, len(resp.Diagnostics))
+		for _, d := range resp.Diagnostics {
+			if d == nil {
+				continue
+			}
+			sevStr := "WARNING"
+			switch d.Severity {
+			case corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_INFO:
+				sevStr = "INFO"
+			case corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_WARNING:
+				sevStr = "WARNING"
+			case corev1.DiagnosticSeverity_DIAGNOSTIC_SEVERITY_ERROR:
+				sevStr = "ERROR"
+			}
+
+			relStr := "WORKSPACE"
+			switch d.Relevance {
+			case corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_TARGET:
+				relStr = "TARGET"
+			case corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_BLAST_RADIUS:
+				relStr = "BLAST_RADIUS"
+			case corev1.DiagnosticRelevance_DIAGNOSTIC_RELEVANCE_WORKSPACE:
+				relStr = "WORKSPACE"
+			}
+
+			impactStr := "PARTIAL"
+			switch d.CompletenessImpact {
+			case corev1.CompletenessStatus_COMPLETENESS_STATUS_COMPLETE:
+				impactStr = "COMPLETE"
+			case corev1.CompletenessStatus_COMPLETENESS_STATUS_PARTIAL:
+				impactStr = "PARTIAL"
+			case corev1.CompletenessStatus_COMPLETENESS_STATUS_DEGRADED:
+				impactStr = "DEGRADED"
+			}
+
+			item := DiagnosticItem{
+				Code:               d.Code,
+				Severity:           sevStr,
+				Message:            d.Message,
+				UnresolvedEndpoint: d.UnresolvedEndpoint,
+				Scope:              d.Scope,
+				EvidenceIDs:        copyStringSlice(d.SupportingEvidenceIds),
+				Relevance:          relStr,
+				CompletenessImpact: impactStr,
+				FirstObservedAt:    d.FirstObservedAt,
+				LastObservedAt:     d.LastObservedAt,
+			}
+			if d.Target != nil {
+				t := transformResourceIdentity(d.Target)
+				item.Subject = &t
+			}
+			if d.ReferencedResource != nil {
+				r := transformResourceIdentity(d.ReferencedResource)
+				item.ReferencedResource = &r
+			}
+			diagnostics = append(diagnostics, item)
+		}
+	}
+
 	return &ImpactAnswer{
 		Target:            target,
 		Summary:           summary,
@@ -266,6 +343,8 @@ func transformProtoResponse(resp *corev1.AnalyzeImpactResponse) *ImpactAnswer {
 		Evidence:          evidence,
 		ExplanationFacts:  explanationFacts,
 		ChangeAssessment:  changeAssessment,
+		Completeness:      completeness,
+		Diagnostics:       diagnostics,
 	}
 }
 
