@@ -15,6 +15,7 @@ import (
 // CoreLoader defines the gRPC client contract required by Materializer.
 type CoreLoader interface {
 	LoadState(ctx context.Context, req *corev1.LoadStateRequest, opts ...grpc.CallOption) (*corev1.LoadStateResponse, error)
+	InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error)
 }
 
 type workspaceLock struct {
@@ -148,6 +149,19 @@ func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*co
 		return nil, fmt.Errorf("materializer failed to load state: %w", err)
 	}
 
+	if err := ValidateAssembledStateIntegrity(state); err != nil {
+		m.logger.Error("State integrity validation failed: refusing to materialize unsafe legacy state",
+			"workspace_id", ws,
+			"error", err.Error(),
+		)
+		if m.client != nil {
+			_, _ = m.client.InvalidateWorkspace(ctx, &corev1.InvalidateWorkspaceRequest{
+				WorkspaceId: ws,
+			})
+		}
+		return nil, err
+	}
+
 	protoReq := &corev1.LoadStateRequest{
 		WorkspaceId:   ws,
 		Relationships: make([]*corev1.Relationship, 0, len(state.Relationships)),
@@ -233,6 +247,11 @@ func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*co
 	duration := time.Since(start)
 
 	if err != nil {
+		if m.client != nil {
+			_, _ = m.client.InvalidateWorkspace(ctx, &corev1.InvalidateWorkspaceRequest{
+				WorkspaceId: ws,
+			})
+		}
 		m.logger.Error("Failed to materialize state to Core Engine",
 			"workspace_id", ws,
 			"duration_ms", duration.Milliseconds(),
@@ -250,4 +269,34 @@ func (m *Materializer) Materialize(ctx context.Context, workspaceID string) (*co
 	)
 
 	return resp, nil
+}
+
+// InvalidateWorkspace sends an InvalidateWorkspaceRequest to the Core Engine to evict
+// the in-memory graph for workspaceID.
+func (m *Materializer) InvalidateWorkspace(ctx context.Context, workspaceID string) error {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return ErrEmptyWorkspace
+	}
+	if m.client == nil {
+		return nil
+	}
+	unlock, err := m.acquireWorkspaceLock(ctx, ws)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	_, err = m.client.InvalidateWorkspace(ctx, &corev1.InvalidateWorkspaceRequest{
+		WorkspaceId: ws,
+	})
+	if err != nil {
+		m.logger.Error("Failed to invalidate workspace in Core Engine",
+			"workspace_id", ws,
+			"error", err.Error(),
+		)
+		return fmt.Errorf("failed to invalidate workspace in core: %w", err)
+	}
+	m.logger.Info("Invalidated workspace in Core Engine successfully", "workspace_id", ws)
+	return nil
 }

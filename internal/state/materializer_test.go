@@ -50,6 +50,13 @@ func (m *mockCoreLoader) LoadState(ctx context.Context, req *corev1.LoadStateReq
 	}, nil
 }
 
+func (m *mockCoreLoader) InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error) {
+	return &corev1.InvalidateWorkspaceResponse{
+		WorkspaceId: req.WorkspaceId,
+		Invalidated: true,
+	}, nil
+}
+
 func (m *mockCoreLoader) getLastReq() *corev1.LoadStateRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -96,7 +103,7 @@ func TestMaterializer_Materialize_Success(t *testing.T) {
 		Identity: state.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "frontend",
+			ProviderID:   "cluster-1/default/frontend",
 		},
 	}
 	res2 := state.Resource{
@@ -104,7 +111,7 @@ func TestMaterializer_Materialize_Success(t *testing.T) {
 		Identity: state.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "backend",
+			ProviderID:   "cluster-1/default/backend",
 		},
 	}
 	if err := store.SaveResources(ctx, workspaceID, []state.Resource{res1, res2}); err != nil {
@@ -179,7 +186,7 @@ func TestMaterializer_Materialize_Success(t *testing.T) {
 	if len(req.Relationships) != 1 {
 		t.Errorf("expected 1 proto relationship, got %d", len(req.Relationships))
 	}
-	if req.Relationships[0].Source.ProviderId != "frontend" {
+	if req.Relationships[0].Source.ProviderId != "cluster-1/default/frontend" {
 		t.Errorf("unexpected relationship source: %v", req.Relationships[0].Source)
 	}
 	if len(req.Evidence) != 1 {
@@ -224,7 +231,7 @@ func TestMaterializer_FreshAuthoritativeSnapshotOnSubsequentCalls(t *testing.T) 
 		Identity: state.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "svc-1",
+			ProviderID:   "cluster-1/default/svc-1",
 		},
 	}
 	_ = store.SaveResources(ctx, ws, []state.Resource{res1})
@@ -251,7 +258,7 @@ func TestMaterializer_FreshAuthoritativeSnapshotOnSubsequentCalls(t *testing.T) 
 		Target: state.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "svc-2",
+			ProviderID:   "cluster-1/default/svc-2",
 		},
 		Category: "network",
 		Kind:     "routes_to",
@@ -269,7 +276,7 @@ func TestMaterializer_FreshAuthoritativeSnapshotOnSubsequentCalls(t *testing.T) 
 	if len(loader.lastReq.Relationships) != 1 {
 		t.Fatalf("expected fresh snapshot with 1 relationship, got %d", len(loader.lastReq.Relationships))
 	}
-	if loader.lastReq.Relationships[0].Target.ProviderId != "svc-2" {
+	if loader.lastReq.Relationships[0].Target.ProviderId != "cluster-1/default/svc-2" {
 		t.Errorf("expected updated relationship to svc-2, got %s", loader.lastReq.Relationships[0].Target.ProviderId)
 	}
 }
@@ -322,7 +329,7 @@ func TestMaterializer_Concurrency_SameWorkspaceSerialized(t *testing.T) {
 		Identity: state.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "svc-a",
+			ProviderID:   "cluster-1/default/svc-a",
 		},
 	}
 	_ = baseStore.SaveResources(ctx, ws, []state.Resource{res})
@@ -426,7 +433,7 @@ func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
 		Identity: state.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "pod-v1",
+			ProviderID:   "test-cluster/default/pod-v1",
 		},
 	}
 	_ = baseStore.SaveResources(ctx, ws, []state.Resource{resV1})
@@ -494,9 +501,10 @@ func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
 	// Now while A is paused in LoadState, Reconciliation B commits State 2 to PostgreSQL/store
 	// and invokes ReconcileAndMaterialize
 	t0 := time.Now().UTC()
-	podV2Ev := newTestEvidence("ev-v2", "kubernetes", "pod", "pod-v2", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podV2Ev := newTestEvidence("ev-v2", "kubernetes", "pod", "test-cluster/default/pod-v2", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batchB := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{podV2Ev},
 	}
 
@@ -551,7 +559,7 @@ func TestMaterializer_Concurrency_NewestStateWins(t *testing.T) {
 
 	hasPodV2 := false
 	for _, ev := range lastReq.Evidence {
-		if ev.Subject != nil && ev.Subject.ProviderId == "pod-v2" {
+		if ev.Subject != nil && ev.Subject.ProviderId == "test-cluster/default/pod-v2" {
 			hasPodV2 = true
 			break
 		}
@@ -571,8 +579,8 @@ func TestMaterializer_Concurrency_WorkspaceIsolation(t *testing.T) {
 	wsAlpha := "ws-alpha"
 	wsBeta := "ws-beta"
 
-	_ = store.SaveResources(ctx, wsAlpha, []state.Resource{{WorkspaceID: wsAlpha, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-a"}}})
-	_ = store.SaveResources(ctx, wsBeta, []state.Resource{{WorkspaceID: wsBeta, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-b"}}})
+	_ = store.SaveResources(ctx, wsAlpha, []state.Resource{{WorkspaceID: wsAlpha, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "cluster-a/default/p-a"}}})
+	_ = store.SaveResources(ctx, wsBeta, []state.Resource{{WorkspaceID: wsBeta, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "cluster-b/default/p-b"}}})
 
 	alphaPaused := make(chan struct{})
 	alphaProceed := make(chan struct{})
@@ -630,7 +638,7 @@ func TestMaterializer_Concurrency_ErrorAndCancellation(t *testing.T) {
 	store := state.NewMemoryStore()
 	ws := "ws-err-cancel"
 
-	_ = store.SaveResources(ctx, ws, []state.Resource{{WorkspaceID: ws, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-1"}}})
+	_ = store.SaveResources(ctx, ws, []state.Resource{{WorkspaceID: ws, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "cluster-1/default/p-1"}}})
 
 	// Part 1: Error release
 	loaderErr := errors.New("gRPC core load error")
@@ -727,7 +735,7 @@ func TestMaterializer_Concurrency_AllEntryPointsShareLock(t *testing.T) {
 	store := state.NewMemoryStore()
 	ws := "ws-entrypoints"
 
-	_ = store.SaveResources(ctx, ws, []state.Resource{{WorkspaceID: ws, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p-entry"}}})
+	_ = store.SaveResources(ctx, ws, []state.Resource{{WorkspaceID: ws, Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "cluster-1/default/p-entry"}}})
 
 	blockLoadState := make(chan struct{})
 	releaseLoadState := make(chan struct{})
@@ -776,7 +784,7 @@ func TestMaterializer_Concurrency_AllEntryPointsShareLock(t *testing.T) {
 		batch := state.ObservationBatch{
 			WorkspaceID: ws,
 			Evidence: []*corev1.Evidence{
-				newTestEvidence("ev-entry-2", "k8s", "pod", "p-entry", "CONTROL_PLANE_OBJECT", `{}`, time.Now().UTC()),
+				newTestEvidence("ev-entry-2", "k8s", "pod", "cluster-1/default/p-entry", "CONTROL_PLANE_OBJECT", `{}`, time.Now().UTC()),
 			},
 		}
 		_, err := reconciler.ReconcileAndMaterialize(ctx, batch)
