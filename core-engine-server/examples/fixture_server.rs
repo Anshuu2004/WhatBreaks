@@ -27,9 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = Graph::new();
     let mut prov = ProvenanceStore::new();
 
-    let target = domain_identity("kubernetes", "service", "payments-api");
-    let checkout = domain_identity("kubernetes", "service", "checkout-service");
-    let frontend = domain_identity("kubernetes", "service", "frontend");
+    let target = domain_identity("kubernetes", "service", "cluster-1/default/payments-api");
+    let checkout = domain_identity("kubernetes", "service", "cluster-1/default/checkout-service");
+    let frontend = domain_identity("kubernetes", "service", "cluster-1/default/frontend");
 
     let rel1 = Relationship::new(
         checkout.clone(),

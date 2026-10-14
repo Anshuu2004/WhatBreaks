@@ -95,7 +95,8 @@ use wb_core_engine::answer::AnswerEngine;
 use wb_core_engine::{Evidence, Graph, ProvenanceStore};
 use wb_core_proto::core_v1::answer_service_server::AnswerService;
 use wb_core_proto::core_v1::{
-    AnalyzeImpactRequest, AnalyzeImpactResponse, LoadStateRequest, LoadStateResponse,
+    AnalyzeImpactRequest, AnalyzeImpactResponse, InvalidateWorkspaceRequest,
+    InvalidateWorkspaceResponse, LoadStateRequest, LoadStateResponse,
 };
 
 use crate::convert::{
@@ -290,6 +291,31 @@ impl AnswerService for AnswerServiceImpl {
             relationships_loaded: rel_count,
             evidence_loaded: ev_count,
             provenance_links_loaded: prov_count,
+        });
+        if let Ok(val) = self.instance_id.parse() {
+            resp.metadata_mut().insert("x-server-instance-id", val);
+        }
+
+        Ok(resp)
+    }
+
+    async fn invalidate_workspace(
+        &self,
+        request: Request<InvalidateWorkspaceRequest>,
+    ) -> Result<Response<InvalidateWorkspaceResponse>, Status> {
+        let req = request.into_inner();
+        let ws_id = req.workspace_id;
+
+        let mut tenants = self
+            .tenants
+            .write()
+            .map_err(|_| Status::internal("tenants lock poisoned"))?;
+
+        let removed = tenants.remove(&ws_id).is_some();
+
+        let mut resp = Response::new(InvalidateWorkspaceResponse {
+            workspace_id: ws_id,
+            invalidated: removed,
         });
         if let Ok(val) = self.instance_id.parse() {
             resp.metadata_mut().insert("x-server-instance-id", val);

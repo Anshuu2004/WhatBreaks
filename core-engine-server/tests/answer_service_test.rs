@@ -552,3 +552,81 @@ async fn test_rpc_change_aware_delete_vs_update() {
     assert_eq!(err_invalid.code(), Code::InvalidArgument);
     assert!(err_invalid.message().contains("unsupported change_type"));
 }
+
+#[tokio::test]
+async fn test_rpc_invalidate_workspace() {
+    let answer_svc = AnswerServiceImpl::default();
+
+    // 1. Populate workspace A
+    let load_req_a = Request::new(proto::LoadStateRequest {
+        workspace_id: "ws-a".to_string(),
+        relationships: vec![proto::Relationship {
+            source: Some(proto_identity("kubernetes", "service", "cluster-1/default/frontend")),
+            target: Some(proto_identity("kubernetes", "service", "cluster-1/default/backend")),
+            kind: "CALLS".to_string(),
+            category: "Invocation".to_string(),
+        }],
+        associations: vec![],
+        evidence: vec![],
+        observed_resources: vec![],
+        diagnostics: vec![],
+    });
+    answer_svc.load_state(load_req_a).await.unwrap();
+
+    // 2. Populate workspace B
+    let load_req_b = Request::new(proto::LoadStateRequest {
+        workspace_id: "ws-b".to_string(),
+        relationships: vec![proto::Relationship {
+            source: Some(proto_identity("kubernetes", "service", "cluster-1/default/auth")),
+            target: Some(proto_identity("kubernetes", "service", "cluster-1/default/db")),
+            kind: "CALLS".to_string(),
+            category: "Invocation".to_string(),
+        }],
+        associations: vec![],
+        evidence: vec![],
+        observed_resources: vec![],
+        diagnostics: vec![],
+    });
+    answer_svc.load_state(load_req_b).await.unwrap();
+
+    // 3. Query workspace A -> must succeed
+    let query_a = Request::new(AnalyzeImpactRequest {
+        target: Some(proto_identity("kubernetes", "service", "cluster-1/default/backend")),
+        direction: "incoming".to_string(),
+        max_depth: 2,
+        workspace_id: "ws-a".to_string(),
+        proposed_change: None,
+    });
+    let res_a = answer_svc.analyze_impact(query_a).await.unwrap().into_inner();
+    assert_eq!(res_a.summary.unwrap().impacted_count, 1);
+
+    // 4. Invalidate workspace A
+    let inv_req = Request::new(proto::InvalidateWorkspaceRequest {
+        workspace_id: "ws-a".to_string(),
+    });
+    let inv_resp = answer_svc.invalidate_workspace(inv_req).await.unwrap().into_inner();
+    assert_eq!(inv_resp.workspace_id, "ws-a");
+    assert!(inv_resp.invalidated);
+
+    // 5. Query workspace A again -> must return FailedPrecondition (unmaterialized)
+    let query_a2 = Request::new(AnalyzeImpactRequest {
+        target: Some(proto_identity("kubernetes", "service", "cluster-1/default/backend")),
+        direction: "incoming".to_string(),
+        max_depth: 2,
+        workspace_id: "ws-a".to_string(),
+        proposed_change: None,
+    });
+    let err_a = answer_svc.analyze_impact(query_a2).await.unwrap_err();
+    assert_eq!(err_a.code(), Code::FailedPrecondition);
+
+    // 6. Query workspace B -> must still succeed (tenant isolation preserved!)
+    let query_b = Request::new(AnalyzeImpactRequest {
+        target: Some(proto_identity("kubernetes", "service", "cluster-1/default/db")),
+        direction: "incoming".to_string(),
+        max_depth: 2,
+        workspace_id: "ws-b".to_string(),
+        proposed_change: None,
+    });
+    let res_b = answer_svc.analyze_impact(query_b).await.unwrap().into_inner();
+    assert_eq!(res_b.summary.unwrap().impacted_count, 1);
+}

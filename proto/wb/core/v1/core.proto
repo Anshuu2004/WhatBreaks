@@ -424,5 +424,20 @@ service AnswerService {
 
   // Load authoritative assembled state into the Core Engine for a workspace.
   rpc LoadState(LoadStateRequest) returns (LoadStateResponse);
+
+  // InvalidateWorkspace purges the in-memory graph, provenance, and evidence
+  // for a workspace from the Core Engine, ensuring no stale or invalid state is served.
+  rpc InvalidateWorkspace(InvalidateWorkspaceRequest) returns (InvalidateWorkspaceResponse);
+}
+
+// InvalidateWorkspaceRequest requests eviction of a workspace's in-memory graph from the Core Engine.
+message InvalidateWorkspaceRequest {
+  string workspace_id = 1;
+}
+
+// InvalidateWorkspaceResponse reports whether a workspace was evicted from the Core Engine.
+message InvalidateWorkspaceResponse {
+  string workspace_id = 1;
+  bool invalidated = 2;
 }
 

@@ -144,6 +144,18 @@ func (c *Client) LoadState(ctx context.Context, req *corev1.LoadStateRequest, op
 	return c.answerClient.LoadState(ctx, req, opts...)
 }
 
+// InvalidateWorkspace sends an InvalidateWorkspaceRequest to the Rust Core Engine AnswerService to evict the in-memory graph.
+func (c *Client) InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error) {
+	if c == nil || c.answerClient == nil {
+		return nil, status.Error(codes.FailedPrecondition, "client is not connected")
+	}
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request cannot be nil")
+	}
+
+	return c.answerClient.InvalidateWorkspace(ctx, req, opts...)
+}
+
 // AnswerServiceClient returns the raw generated AnswerServiceClient interface.
 func (c *Client) AnswerServiceClient() corev1.AnswerServiceClient {
 	return c.answerClient

@@ -2122,6 +2122,104 @@ func (x *LoadStateResponse) GetProvenanceLinksLoaded() uint32 {
 	return 0
 }
 
+// InvalidateWorkspaceRequest requests eviction of a workspace's in-memory graph from the Core Engine.
+type InvalidateWorkspaceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InvalidateWorkspaceRequest) Reset() {
+	*x = InvalidateWorkspaceRequest{}
+	mi := &file_wb_core_v1_core_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InvalidateWorkspaceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InvalidateWorkspaceRequest) ProtoMessage() {}
+
+func (x *InvalidateWorkspaceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_wb_core_v1_core_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InvalidateWorkspaceRequest.ProtoReflect.Descriptor instead.
+func (*InvalidateWorkspaceRequest) Descriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *InvalidateWorkspaceRequest) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+// InvalidateWorkspaceResponse reports whether a workspace was evicted from the Core Engine.
+type InvalidateWorkspaceResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	Invalidated   bool                   `protobuf:"varint,2,opt,name=invalidated,proto3" json:"invalidated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InvalidateWorkspaceResponse) Reset() {
+	*x = InvalidateWorkspaceResponse{}
+	mi := &file_wb_core_v1_core_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InvalidateWorkspaceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InvalidateWorkspaceResponse) ProtoMessage() {}
+
+func (x *InvalidateWorkspaceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_wb_core_v1_core_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InvalidateWorkspaceResponse.ProtoReflect.Descriptor instead.
+func (*InvalidateWorkspaceResponse) Descriptor() ([]byte, []int) {
+	return file_wb_core_v1_core_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *InvalidateWorkspaceResponse) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *InvalidateWorkspaceResponse) GetInvalidated() bool {
+	if x != nil {
+		return x.Invalidated
+	}
+	return false
+}
+
 var File_wb_core_v1_core_proto protoreflect.FileDescriptor
 
 const file_wb_core_v1_core_proto_rawDesc = "" +
@@ -2259,7 +2357,12 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x121\n" +
 	"\x14relationships_loaded\x18\x02 \x01(\rR\x13relationshipsLoaded\x12'\n" +
 	"\x0fevidence_loaded\x18\x03 \x01(\rR\x0eevidenceLoaded\x126\n" +
-	"\x17provenance_links_loaded\x18\x04 \x01(\rR\x15provenanceLinksLoaded*\x89\x01\n" +
+	"\x17provenance_links_loaded\x18\x04 \x01(\rR\x15provenanceLinksLoaded\"?\n" +
+	"\x1aInvalidateWorkspaceRequest\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\"b\n" +
+	"\x1bInvalidateWorkspaceResponse\x12!\n" +
+	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12 \n" +
+	"\vinvalidated\x18\x02 \x01(\bR\vinvalidated*\x89\x01\n" +
 	"\n" +
 	"ChangeType\x12\x1b\n" +
 	"\x17CHANGE_TYPE_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -2283,10 +2386,11 @@ const file_wb_core_v1_core_proto_rawDesc = "" +
 	"!DIAGNOSTIC_RELEVANCE_BLAST_RADIUS\x10\x02\x12\"\n" +
 	"\x1eDIAGNOSTIC_RELEVANCE_WORKSPACE\x10\x032e\n" +
 	"\x10DiscoveryService\x12Q\n" +
-	"\fRunDiscovery\x12\x1f.wb.core.v1.RunDiscoveryRequest\x1a .wb.core.v1.RunDiscoveryResponse2\xaf\x01\n" +
+	"\fRunDiscovery\x12\x1f.wb.core.v1.RunDiscoveryRequest\x1a .wb.core.v1.RunDiscoveryResponse2\x97\x02\n" +
 	"\rAnswerService\x12T\n" +
 	"\rAnalyzeImpact\x12 .wb.core.v1.AnalyzeImpactRequest\x1a!.wb.core.v1.AnalyzeImpactResponse\x12H\n" +
-	"\tLoadState\x12\x1c.wb.core.v1.LoadStateRequest\x1a\x1d.wb.core.v1.LoadStateResponseBCZAgithub.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1;corev1b\x06proto3"
+	"\tLoadState\x12\x1c.wb.core.v1.LoadStateRequest\x1a\x1d.wb.core.v1.LoadStateResponse\x12f\n" +
+	"\x13InvalidateWorkspace\x12&.wb.core.v1.InvalidateWorkspaceRequest\x1a'.wb.core.v1.InvalidateWorkspaceResponseBCZAgithub.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1;corev1b\x06proto3"
 
 var (
 	file_wb_core_v1_core_proto_rawDescOnce sync.Once
@@ -2301,38 +2405,40 @@ func file_wb_core_v1_core_proto_rawDescGZIP() []byte {
 }
 
 var file_wb_core_v1_core_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_wb_core_v1_core_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_wb_core_v1_core_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_wb_core_v1_core_proto_goTypes = []any{
-	(ChangeType)(0),                // 0: wb.core.v1.ChangeType
-	(CompletenessStatus)(0),        // 1: wb.core.v1.CompletenessStatus
-	(DiagnosticSeverity)(0),        // 2: wb.core.v1.DiagnosticSeverity
-	(DiagnosticRelevance)(0),       // 3: wb.core.v1.DiagnosticRelevance
-	(*ResourceIdentity)(nil),       // 4: wb.core.v1.ResourceIdentity
-	(*EvidenceSource)(nil),         // 5: wb.core.v1.EvidenceSource
-	(*Evidence)(nil),               // 6: wb.core.v1.Evidence
-	(*Relationship)(nil),           // 7: wb.core.v1.Relationship
-	(*DiscoveredRelationship)(nil), // 8: wb.core.v1.DiscoveredRelationship
-	(*DiscoveryResult)(nil),        // 9: wb.core.v1.DiscoveryResult
-	(*Insufficient)(nil),           // 10: wb.core.v1.Insufficient
-	(*Conflict)(nil),               // 11: wb.core.v1.Conflict
-	(*Invalid)(nil),                // 12: wb.core.v1.Invalid
-	(*RunDiscoveryRequest)(nil),    // 13: wb.core.v1.RunDiscoveryRequest
-	(*RunDiscoveryResponse)(nil),   // 14: wb.core.v1.RunDiscoveryResponse
-	(*ProposedChange)(nil),         // 15: wb.core.v1.ProposedChange
-	(*ChangeAssessment)(nil),       // 16: wb.core.v1.ChangeAssessment
-	(*AnalyzeImpactRequest)(nil),   // 17: wb.core.v1.AnalyzeImpactRequest
-	(*ImpactSummary)(nil),          // 18: wb.core.v1.ImpactSummary
-	(*ImpactedResource)(nil),       // 19: wb.core.v1.ImpactedResource
-	(*AnswerRelationship)(nil),     // 20: wb.core.v1.AnswerRelationship
-	(*ImpactPath)(nil),             // 21: wb.core.v1.ImpactPath
-	(*AnswerEvidence)(nil),         // 22: wb.core.v1.AnswerEvidence
-	(*ExplanationFact)(nil),        // 23: wb.core.v1.ExplanationFact
-	(*AnalysisCompleteness)(nil),   // 24: wb.core.v1.AnalysisCompleteness
-	(*DiagnosticItem)(nil),         // 25: wb.core.v1.DiagnosticItem
-	(*AnalyzeImpactResponse)(nil),  // 26: wb.core.v1.AnalyzeImpactResponse
-	(*RelationshipEvidence)(nil),   // 27: wb.core.v1.RelationshipEvidence
-	(*LoadStateRequest)(nil),       // 28: wb.core.v1.LoadStateRequest
-	(*LoadStateResponse)(nil),      // 29: wb.core.v1.LoadStateResponse
+	(ChangeType)(0),                     // 0: wb.core.v1.ChangeType
+	(CompletenessStatus)(0),             // 1: wb.core.v1.CompletenessStatus
+	(DiagnosticSeverity)(0),             // 2: wb.core.v1.DiagnosticSeverity
+	(DiagnosticRelevance)(0),            // 3: wb.core.v1.DiagnosticRelevance
+	(*ResourceIdentity)(nil),            // 4: wb.core.v1.ResourceIdentity
+	(*EvidenceSource)(nil),              // 5: wb.core.v1.EvidenceSource
+	(*Evidence)(nil),                    // 6: wb.core.v1.Evidence
+	(*Relationship)(nil),                // 7: wb.core.v1.Relationship
+	(*DiscoveredRelationship)(nil),      // 8: wb.core.v1.DiscoveredRelationship
+	(*DiscoveryResult)(nil),             // 9: wb.core.v1.DiscoveryResult
+	(*Insufficient)(nil),                // 10: wb.core.v1.Insufficient
+	(*Conflict)(nil),                    // 11: wb.core.v1.Conflict
+	(*Invalid)(nil),                     // 12: wb.core.v1.Invalid
+	(*RunDiscoveryRequest)(nil),         // 13: wb.core.v1.RunDiscoveryRequest
+	(*RunDiscoveryResponse)(nil),        // 14: wb.core.v1.RunDiscoveryResponse
+	(*ProposedChange)(nil),              // 15: wb.core.v1.ProposedChange
+	(*ChangeAssessment)(nil),            // 16: wb.core.v1.ChangeAssessment
+	(*AnalyzeImpactRequest)(nil),        // 17: wb.core.v1.AnalyzeImpactRequest
+	(*ImpactSummary)(nil),               // 18: wb.core.v1.ImpactSummary
+	(*ImpactedResource)(nil),            // 19: wb.core.v1.ImpactedResource
+	(*AnswerRelationship)(nil),          // 20: wb.core.v1.AnswerRelationship
+	(*ImpactPath)(nil),                  // 21: wb.core.v1.ImpactPath
+	(*AnswerEvidence)(nil),              // 22: wb.core.v1.AnswerEvidence
+	(*ExplanationFact)(nil),             // 23: wb.core.v1.ExplanationFact
+	(*AnalysisCompleteness)(nil),        // 24: wb.core.v1.AnalysisCompleteness
+	(*DiagnosticItem)(nil),              // 25: wb.core.v1.DiagnosticItem
+	(*AnalyzeImpactResponse)(nil),       // 26: wb.core.v1.AnalyzeImpactResponse
+	(*RelationshipEvidence)(nil),        // 27: wb.core.v1.RelationshipEvidence
+	(*LoadStateRequest)(nil),            // 28: wb.core.v1.LoadStateRequest
+	(*LoadStateResponse)(nil),           // 29: wb.core.v1.LoadStateResponse
+	(*InvalidateWorkspaceRequest)(nil),  // 30: wb.core.v1.InvalidateWorkspaceRequest
+	(*InvalidateWorkspaceResponse)(nil), // 31: wb.core.v1.InvalidateWorkspaceResponse
 }
 var file_wb_core_v1_core_proto_depIdxs = []int32{
 	5,  // 0: wb.core.v1.Evidence.source:type_name -> wb.core.v1.EvidenceSource
@@ -2382,11 +2488,13 @@ var file_wb_core_v1_core_proto_depIdxs = []int32{
 	13, // 44: wb.core.v1.DiscoveryService.RunDiscovery:input_type -> wb.core.v1.RunDiscoveryRequest
 	17, // 45: wb.core.v1.AnswerService.AnalyzeImpact:input_type -> wb.core.v1.AnalyzeImpactRequest
 	28, // 46: wb.core.v1.AnswerService.LoadState:input_type -> wb.core.v1.LoadStateRequest
-	14, // 47: wb.core.v1.DiscoveryService.RunDiscovery:output_type -> wb.core.v1.RunDiscoveryResponse
-	26, // 48: wb.core.v1.AnswerService.AnalyzeImpact:output_type -> wb.core.v1.AnalyzeImpactResponse
-	29, // 49: wb.core.v1.AnswerService.LoadState:output_type -> wb.core.v1.LoadStateResponse
-	47, // [47:50] is the sub-list for method output_type
-	44, // [44:47] is the sub-list for method input_type
+	30, // 47: wb.core.v1.AnswerService.InvalidateWorkspace:input_type -> wb.core.v1.InvalidateWorkspaceRequest
+	14, // 48: wb.core.v1.DiscoveryService.RunDiscovery:output_type -> wb.core.v1.RunDiscoveryResponse
+	26, // 49: wb.core.v1.AnswerService.AnalyzeImpact:output_type -> wb.core.v1.AnalyzeImpactResponse
+	29, // 50: wb.core.v1.AnswerService.LoadState:output_type -> wb.core.v1.LoadStateResponse
+	31, // 51: wb.core.v1.AnswerService.InvalidateWorkspace:output_type -> wb.core.v1.InvalidateWorkspaceResponse
+	48, // [48:52] is the sub-list for method output_type
+	44, // [44:48] is the sub-list for method input_type
 	44, // [44:44] is the sub-list for extension type_name
 	44, // [44:44] is the sub-list for extension extendee
 	0,  // [0:44] is the sub-list for field type_name
@@ -2409,7 +2517,7 @@ func file_wb_core_v1_core_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wb_core_v1_core_proto_rawDesc), len(file_wb_core_v1_core_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   26,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

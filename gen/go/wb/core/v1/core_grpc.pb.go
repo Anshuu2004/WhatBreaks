@@ -156,8 +156,9 @@ var DiscoveryService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	AnswerService_AnalyzeImpact_FullMethodName = "/wb.core.v1.AnswerService/AnalyzeImpact"
-	AnswerService_LoadState_FullMethodName     = "/wb.core.v1.AnswerService/LoadState"
+	AnswerService_AnalyzeImpact_FullMethodName       = "/wb.core.v1.AnswerService/AnalyzeImpact"
+	AnswerService_LoadState_FullMethodName           = "/wb.core.v1.AnswerService/LoadState"
+	AnswerService_InvalidateWorkspace_FullMethodName = "/wb.core.v1.AnswerService/InvalidateWorkspace"
 )
 
 // AnswerServiceClient is the client API for AnswerService service.
@@ -175,6 +176,9 @@ type AnswerServiceClient interface {
 	AnalyzeImpact(ctx context.Context, in *AnalyzeImpactRequest, opts ...grpc.CallOption) (*AnalyzeImpactResponse, error)
 	// Load authoritative assembled state into the Core Engine for a workspace.
 	LoadState(ctx context.Context, in *LoadStateRequest, opts ...grpc.CallOption) (*LoadStateResponse, error)
+	// InvalidateWorkspace purges the in-memory graph, provenance, and evidence
+	// for a workspace from the Core Engine, ensuring no stale or invalid state is served.
+	InvalidateWorkspace(ctx context.Context, in *InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*InvalidateWorkspaceResponse, error)
 }
 
 type answerServiceClient struct {
@@ -205,6 +209,16 @@ func (c *answerServiceClient) LoadState(ctx context.Context, in *LoadStateReques
 	return out, nil
 }
 
+func (c *answerServiceClient) InvalidateWorkspace(ctx context.Context, in *InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*InvalidateWorkspaceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InvalidateWorkspaceResponse)
+	err := c.cc.Invoke(ctx, AnswerService_InvalidateWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AnswerServiceServer is the server API for AnswerService service.
 // All implementations must embed UnimplementedAnswerServiceServer
 // for forward compatibility.
@@ -220,6 +234,9 @@ type AnswerServiceServer interface {
 	AnalyzeImpact(context.Context, *AnalyzeImpactRequest) (*AnalyzeImpactResponse, error)
 	// Load authoritative assembled state into the Core Engine for a workspace.
 	LoadState(context.Context, *LoadStateRequest) (*LoadStateResponse, error)
+	// InvalidateWorkspace purges the in-memory graph, provenance, and evidence
+	// for a workspace from the Core Engine, ensuring no stale or invalid state is served.
+	InvalidateWorkspace(context.Context, *InvalidateWorkspaceRequest) (*InvalidateWorkspaceResponse, error)
 	mustEmbedUnimplementedAnswerServiceServer()
 }
 
@@ -235,6 +252,9 @@ func (UnimplementedAnswerServiceServer) AnalyzeImpact(context.Context, *AnalyzeI
 }
 func (UnimplementedAnswerServiceServer) LoadState(context.Context, *LoadStateRequest) (*LoadStateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method LoadState not implemented")
+}
+func (UnimplementedAnswerServiceServer) InvalidateWorkspace(context.Context, *InvalidateWorkspaceRequest) (*InvalidateWorkspaceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InvalidateWorkspace not implemented")
 }
 func (UnimplementedAnswerServiceServer) mustEmbedUnimplementedAnswerServiceServer() {}
 func (UnimplementedAnswerServiceServer) testEmbeddedByValue()                       {}
@@ -293,6 +313,24 @@ func _AnswerService_LoadState_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AnswerService_InvalidateWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InvalidateWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AnswerServiceServer).InvalidateWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AnswerService_InvalidateWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AnswerServiceServer).InvalidateWorkspace(ctx, req.(*InvalidateWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AnswerService_ServiceDesc is the grpc.ServiceDesc for AnswerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -307,6 +345,10 @@ var AnswerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "LoadState",
 			Handler:    _AnswerService_LoadState_Handler,
+		},
+		{
+			MethodName: "InvalidateWorkspace",
+			Handler:    _AnswerService_InvalidateWorkspace_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
