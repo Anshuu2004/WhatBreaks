@@ -12,6 +12,7 @@ import (
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/answer"
+	"github.com/aaradhychinche-alt/WhatBreaks/internal/auth"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/config"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/database"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/logging"
@@ -398,8 +399,8 @@ func TestPostgresStore_Integration(t *testing.T) {
 		})
 
 		// Insert topology in Postgres: service-a -[DEPENDS_ON]-> service-b
-		serviceA := state.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "service-a"}
-		serviceB := state.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "service-b"}
+		serviceA := state.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "cluster-pg/default/service-a"}
+		serviceB := state.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "cluster-pg/default/service-b"}
 
 		resA := state.Resource{WorkspaceID: wsMat, Identity: serviceA, FirstObservedAt: now, LastObservedAt: now}
 		resB := state.Resource{WorkspaceID: wsMat, Identity: serviceB, FirstObservedAt: now, LastObservedAt: now}
@@ -415,7 +416,7 @@ func TestPostgresStore_Integration(t *testing.T) {
 			ObservedAt:      now,
 			ObservationType: "RUNTIME_CONNECTION",
 			Subject:         serviceA,
-			Data:            []byte(`{"target": "service-b"}`),
+			Data:            []byte(`{"target": "cluster-pg/default/service-b"}`),
 		}
 		if err := pgStore.SaveEvidence(ctx, wsMat, []state.Evidence{matEv}); err != nil {
 			t.Fatalf("SaveEvidence failed: %v", err)
@@ -516,12 +517,12 @@ func TestPostgresStore_ReconcilerLifecycle(t *testing.T) {
 	frontendSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "payments/frontend",
+		ProviderId:   "test-cluster/payments/frontend",
 	}
 	backendSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "payments/backend",
+		ProviderId:   "test-cluster/payments/backend",
 	}
 
 	connEv := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440071", frontendSubj, "10.0.1.50", 8080)
@@ -530,6 +531,7 @@ func TestPostgresStore_ReconcilerLifecycle(t *testing.T) {
 	// 1. Initial Observation Sweep into PostgreSQL
 	batch1 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{connEv, mapEv},
 	}
 	res1, err := reconciler.Reconcile(ctx, batch1)
@@ -560,6 +562,7 @@ func TestPostgresStore_ReconcilerLifecycle(t *testing.T) {
 	connEvLater := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440073", frontendSubj, "10.0.1.50", 8080)
 	batch3 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{connEvLater},
 	}
 	res3, err := reconciler.ReconcileAndMaterialize(ctx, batch3)
@@ -641,12 +644,12 @@ func TestPostgresStore_PartialCollectionSafety(t *testing.T) {
 	frontendSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "payments/frontend",
+		ProviderId:   "test-cluster/payments/frontend",
 	}
 	backendSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "payments/backend",
+		ProviderId:   "test-cluster/payments/backend",
 	}
 	dbSubj := &corev1.ResourceIdentity{
 		Provider:     "aws",
@@ -663,6 +666,7 @@ func TestPostgresStore_PartialCollectionSafety(t *testing.T) {
 
 	batch1 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev101, ev102, ev103, ev104},
 	}
 	res1, err := reconciler.ReconcileAndMaterialize(ctx, batch1)
@@ -697,6 +701,7 @@ func TestPostgresStore_PartialCollectionSafety(t *testing.T) {
 	ev105 := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440105", frontendSubj, "10.0.1.50", 8080)
 	batch2 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev105},
 	}
 	res2, err := reconciler.ReconcileAndMaterialize(ctx, batch2)
@@ -893,5 +898,274 @@ func TestPostgresStore_ListWorkspaces(t *testing.T) {
 		if !(found1 < found2 && found2 < found3) {
 			t.Errorf("expected %s < %s < %s in ordered workspaces, got indices %d, %d, %d", ws1, ws2, ws3, found1, found2, found3)
 		}
+	}
+}
+
+func TestPostgresStore_RecoveryInvariantsAndAudit(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx := context.Background()
+
+	db, err := database.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("database.New failed: %v", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+
+	ws := "test-recovery-invariants-pg"
+	_ = pgStore.DeleteWorkspaceState(ctx, ws)
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(context.Background(), ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_recovery_audit WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_legacy_resources_archive WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_legacy_relationships_archive WHERE workspace_id = $1", ws)
+	}()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 1. Seed legacy K8s resource, non-K8s resource, and evidence
+	legacyK8sRes := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "default/api-server",
+		},
+		FirstObservedAt: now,
+		LastObservedAt:  now,
+	}
+	nonK8sRes := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "aws",
+			ResourceType: "rds_instance",
+			ProviderID:   "arn:aws:rds:us-east-1:123456789012:db:prod-db",
+		},
+		FirstObservedAt: now,
+		LastObservedAt:  now,
+	}
+	if err := pgStore.SaveResources(ctx, ws, []state.Resource{legacyK8sRes, nonK8sRes}); err != nil {
+		t.Fatalf("SaveResources failed: %v", err)
+	}
+
+	ev1 := state.Evidence{
+		WorkspaceID: ws,
+		ID:          "ev-k8s-hist",
+		Source:      state.EvidenceSource{Provider: "kubernetes", Collector: "k8s-watcher"},
+		ObservedAt:  now,
+		Subject:     legacyK8sRes.Identity,
+		Data:        []byte(`{"status":"running"}`),
+	}
+	ev2 := state.Evidence{
+		WorkspaceID: ws,
+		ID:          "ev-aws-hist",
+		Source:      state.EvidenceSource{Provider: "aws", Collector: "aws-inventory"},
+		ObservedAt:  now,
+		Subject:     nonK8sRes.Identity,
+		Data:        []byte(`{"allocated_storage":100}`),
+	}
+	if err := pgStore.SaveEvidence(ctx, ws, []state.Evidence{ev1, ev2}); err != nil {
+		t.Fatalf("SaveEvidence failed: %v", err)
+	}
+
+	rel1 := state.Relationship{
+		WorkspaceID: ws,
+		Source:      legacyK8sRes.Identity,
+		Target:      nonK8sRes.Identity,
+		Kind:        "CONNECTS_TO",
+		Category:    "Network",
+	}
+	if err := pgStore.SaveRelationships(ctx, ws, []state.Relationship{rel1}); err != nil {
+		t.Fatalf("SaveRelationships failed: %v", err)
+	}
+
+	// 2. Test Authorization Gate: unauthenticated caller must fail
+	unauthReq := state.LegacyRecoveryParams{
+		WorkspaceID:          ws,
+		ClusterID:            "cluster-prod-1",
+		AuthorizeDestructive: true,
+		OperatorIdentity:     "operator@company.com",
+		Reason:               "Test recovery auth",
+	}
+	_, err = pgStore.RecoverWorkspaceLegacyState(ctx, unauthReq)
+	if !errors.Is(err, state.ErrUnauthenticatedOperator) {
+		t.Fatalf("expected ErrUnauthenticatedOperator for unauthenticated context, got: %v", err)
+	}
+
+	// Test Authorization Gate: unauthorized caller (RoleMember) must fail
+	memberCtx := auth.WithUser(ctx, &auth.User{
+		ID:    "user-1",
+		Email: "member@company.com",
+		Role:  auth.RoleMember,
+	})
+	_, err = pgStore.RecoverWorkspaceLegacyState(memberCtx, unauthReq)
+	if !errors.Is(err, state.ErrForbiddenOperator) {
+		t.Fatalf("expected ErrForbiddenOperator for RoleMember, got: %v", err)
+	}
+
+	// Test Authorization Gate: spoofed operator identity must fail
+	adminCtx := auth.WithUser(ctx, &auth.User{
+		ID:    "admin-1",
+		Email: "admin@company.com",
+		Role:  auth.RoleAdmin,
+	})
+	spoofedReq := unauthReq
+	spoofedReq.OperatorIdentity = "someone-else@company.com"
+	_, err = pgStore.RecoverWorkspaceLegacyState(adminCtx, spoofedReq)
+	if !errors.Is(err, state.ErrForbiddenOperator) {
+		t.Fatalf("expected ErrForbiddenOperator for spoofed OperatorIdentity, got: %v", err)
+	}
+
+	// 3. Test Authorized Recovery Execution
+	authReq := state.LegacyRecoveryParams{
+		WorkspaceID:          ws,
+		ClusterID:            "cluster-prod-1",
+		AuthorizeDestructive: true,
+		OperatorIdentity:     "admin@company.com",
+		Reason:               "Legitimate administrative recovery",
+		AuthoritativeBatch: &state.AuthoritativeBatch{
+			Resources: []state.Resource{
+				{
+					WorkspaceID: ws,
+					Identity: state.ResourceIdentity{
+						Provider:     "kubernetes",
+						ResourceType: "pod",
+						ProviderID:   "cluster-prod-1/default/api-server",
+					},
+					FirstObservedAt: now,
+					LastObservedAt:  now,
+				},
+			},
+			Relationships: []state.Relationship{
+				{
+					WorkspaceID: ws,
+					Source: state.ResourceIdentity{
+						Provider:     "kubernetes",
+						ResourceType: "pod",
+						ProviderID:   "cluster-prod-1/default/api-server",
+					},
+					Target:   nonK8sRes.Identity,
+					Kind:     "CONNECTS_TO",
+					Category: "Network",
+				},
+			},
+		},
+	}
+
+	recovResult, err := pgStore.RecoverWorkspaceLegacyState(adminCtx, authReq)
+	if err != nil {
+		t.Fatalf("RecoverWorkspaceLegacyState failed: %v", err)
+	}
+
+	if recovResult.LegacyResourcesArchived != 1 {
+		t.Errorf("expected 1 archived resource, got %d", recovResult.LegacyResourcesArchived)
+	}
+	if recovResult.RecollectedResourcesCount != 1 {
+		t.Errorf("expected 1 recollected resource, got %d", recovResult.RecollectedResourcesCount)
+	}
+
+	// 4. Verify durable state machine table state_workspace_recovery is COMPLETED
+	var status string
+	err = db.QueryRow(ctx, "SELECT status FROM state_workspace_recovery WHERE workspace_id = $1", ws).Scan(&status)
+	if err != nil {
+		t.Fatalf("query state_workspace_recovery failed: %v", err)
+	}
+	if status != "COMPLETED" {
+		t.Fatalf("expected state_workspace_recovery status COMPLETED, got %s", status)
+	}
+
+	// 5. Verify non-K8s resource and historical evidence are preserved
+	activeResources, err := pgStore.ListResources(ctx, ws)
+	if err != nil {
+		t.Fatalf("ListResources failed: %v", err)
+	}
+	if len(activeResources) != 2 {
+		t.Fatalf("expected 2 active resources (1 canonical k8s, 1 aws), got %d", len(activeResources))
+	}
+	var hasCanonicalK8s, hasAws bool
+	for _, r := range activeResources {
+		if r.Identity.Provider == "kubernetes" && r.Identity.ProviderID == "cluster-prod-1/default/api-server" {
+			hasCanonicalK8s = true
+		}
+		if r.Identity.Provider == "aws" && r.Identity.ProviderID == nonK8sRes.Identity.ProviderID {
+			hasAws = true
+		}
+	}
+	if !hasCanonicalK8s || !hasAws {
+		t.Fatalf("expected active resources to contain canonical k8s and aws, got: %+v", activeResources)
+	}
+
+	// Evidence intact
+	evList, err := pgStore.ListEvidence(ctx, ws)
+	if err != nil {
+		t.Fatalf("ListEvidence failed: %v", err)
+	}
+	if len(evList) != 2 {
+		t.Fatalf("expected 2 historical evidence records intact, got %d", len(evList))
+	}
+
+	// Archive tables verification
+	var archiveResCount int
+	err = db.QueryRow(ctx, "SELECT count(*) FROM state_legacy_resources_archive WHERE workspace_id = $1", ws).Scan(&archiveResCount)
+	if err != nil || archiveResCount != 1 {
+		t.Fatalf("expected 1 record in state_legacy_resources_archive, got %d (err: %v)", archiveResCount, err)
+	}
+
+	// Audit table verification: operation_id, failure_category, recollected_resources
+	audits, err := pgStore.ListRecoveryAudits(ctx, ws)
+	if err != nil {
+		t.Fatalf("ListRecoveryAudits failed: %v", err)
+	}
+	if len(audits) == 0 {
+		t.Fatalf("expected audit records in state_recovery_audit")
+	}
+	lastAudit := audits[len(audits)-1]
+	if lastAudit.OperationID == "" {
+		t.Errorf("expected non-empty OperationID")
+	}
+	if lastAudit.OperatorIdentity != "admin@company.com" {
+		t.Errorf("expected operator admin@company.com, got %s", lastAudit.OperatorIdentity)
+	}
+	if lastAudit.RecollectedResourcesCount != 1 {
+		t.Errorf("expected RecollectedResourcesCount 1, got %d", lastAudit.RecollectedResourcesCount)
+	}
+
+	// 6. Test Fail-Closed behavior when recovery status is FAILED
+	_, err = db.Exec(ctx, "UPDATE state_workspace_recovery SET status = 'FAILED' WHERE workspace_id = $1", ws)
+	if err != nil {
+		t.Fatalf("update state_workspace_recovery to FAILED failed: %v", err)
+	}
+
+	// CheckWorkspaceIntegrity must fail closed
+	err = pgStore.CheckWorkspaceIntegrity(ctx, ws)
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired from CheckWorkspaceIntegrity when recovery failed, got: %v", err)
+	}
+
+	// ReconcileAuthoritativeBatch must fail closed
+	_, err = pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources: []state.Resource{
+			{
+				WorkspaceID: ws,
+				Identity: state.ResourceIdentity{
+					Provider:     "kubernetes",
+					ResourceType: "pod",
+					ProviderID:   "cluster-prod-1/default/pod-1",
+				},
+				FirstObservedAt: now,
+				LastObservedAt:  now,
+			},
+		},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired from ReconcileAuthoritativeBatch when recovery failed, got: %v", err)
 	}
 }

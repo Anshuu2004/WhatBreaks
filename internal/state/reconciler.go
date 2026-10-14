@@ -671,3 +671,63 @@ func extractEndpointFromConnectionData(data []byte) string {
 	}
 	return "unknown"
 }
+
+// LegacyStateRecoverer defines the administrative recovery capability for workspaces
+// containing incompatible legacy Kubernetes state.
+type LegacyStateRecoverer interface {
+	RecoverLegacyState(ctx context.Context, params LegacyRecoveryParams) (*LegacyRecoveryResult, error)
+}
+
+// RecoverLegacyState performs safe, authoritative administrative legacy recovery for a workspace:
+// 1. Validates that destructive recovery is explicitly authorized (params.AuthorizeDestructive == true).
+// 2. Acquires the workspace serialization lock to prevent races with ongoing reconciliations or materializations.
+// 3. Executes the underlying Store's transactional recovery (archiving legacy resources, relationships,
+//    provenance, and diagnostics while strictly preserving historical evidence and non-K8s provider state).
+// 4. Ingests any provided authoritative recollection batch.
+// 5. If a materializer is configured, refreshes the Rust Core Engine with the authoritative clean state.
+func (r *DefaultReconciler) RecoverLegacyState(ctx context.Context, params LegacyRecoveryParams) (*LegacyRecoveryResult, error) {
+	if !params.AuthorizeDestructive {
+		return nil, ErrUnauthorizedDestructiveAction
+	}
+	if strings.TrimSpace(params.WorkspaceID) == "" {
+		return nil, errors.New("workspace_id is required")
+	}
+
+	wsLock := r.getWorkspaceLock(params.WorkspaceID)
+	wsLock.Lock()
+	defer wsLock.Unlock()
+
+	// Invalidate workspace in Core Engine immediately before recovery so no queries can run against stale state.
+	if r.materializer != nil {
+		_ = r.materializer.InvalidateWorkspace(ctx, params.WorkspaceID)
+	}
+
+	result, err := r.store.RecoverWorkspaceLegacyState(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+
+	// If materializer is available, rematerialize the newly clean state into the Core Engine.
+	if r.materializer != nil {
+		if _, matErr := r.materializer.Materialize(ctx, params.WorkspaceID); matErr != nil {
+			r.logger.Warn("Failed to rematerialize workspace after legacy recovery",
+				"workspace_id", params.WorkspaceID,
+				"error", matErr.Error(),
+			)
+			return result, fmt.Errorf("workspace recovered but core engine rematerialization failed: %w", matErr)
+		}
+	}
+
+	r.logger.Info("Legacy state recovery completed successfully",
+		"workspace_id", params.WorkspaceID,
+		"cluster_id", params.ClusterID,
+		"resources_archived", result.LegacyResourcesArchived,
+		"relationships_archived", result.LegacyRelationshipsArchived,
+		"provenance_archived", result.LegacyProvenanceArchived,
+		"diagnostics_archived", result.LegacyDiagnosticsArchived,
+		"evidence_preserved", result.EvidencePreservedCount,
+		"non_k8s_resources_preserved", result.NonK8sResourcesPreserved,
+	)
+
+	return result, nil
+}

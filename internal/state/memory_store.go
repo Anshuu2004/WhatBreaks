@@ -23,6 +23,24 @@ type MemoryStore struct {
 	staleAudits   map[string][]StaleRunAudit
 	diagnostics   map[string]map[string]DiagnosticItem
 	scopeSweeps   map[string]map[string]ScopeSweep
+
+	legacyResourcesArchive     map[string][]Resource
+	legacyRelationshipsArchive map[string][]Relationship
+	legacyProvenanceArchive    map[string][]ProvenanceAssociation
+	legacyDiagnosticsArchive   map[string][]DiagnosticItem
+	recoveryAudits             map[string][]RecoveryAuditRecord
+	recoveryStatus             map[string]memoryRecoveryStatus
+}
+
+type memoryRecoveryStatus struct {
+	WorkspaceID      string
+	ClusterID        string
+	OperationID      string
+	Status           string // "IN_PROGRESS", "COMPLETED", "FAILED"
+	OperatorIdentity string
+	StartedAt        time.Time
+	UpdatedAt        time.Time
+	ErrorMessage     string
 }
 
 // NewMemoryStore initializes an empty MemoryStore.
@@ -38,6 +56,13 @@ func NewMemoryStore() *MemoryStore {
 		staleAudits:   make(map[string][]StaleRunAudit),
 		diagnostics:   make(map[string]map[string]DiagnosticItem),
 		scopeSweeps:   make(map[string]map[string]ScopeSweep),
+
+		legacyResourcesArchive:     make(map[string][]Resource),
+		legacyRelationshipsArchive: make(map[string][]Relationship),
+		legacyProvenanceArchive:    make(map[string][]ProvenanceAssociation),
+		legacyDiagnosticsArchive:   make(map[string][]DiagnosticItem),
+		recoveryAudits:             make(map[string][]RecoveryAuditRecord),
+		recoveryStatus:             make(map[string]memoryRecoveryStatus),
 	}
 }
 
@@ -426,6 +451,11 @@ func (s *MemoryStore) DeleteWorkspaceState(ctx context.Context, workspaceID stri
 	delete(s.conflicts, ws)
 	delete(s.diagnostics, ws)
 	delete(s.scopeSweeps, ws)
+	delete(s.legacyResourcesArchive, ws)
+	delete(s.legacyRelationshipsArchive, ws)
+	delete(s.legacyProvenanceArchive, ws)
+	delete(s.legacyDiagnosticsArchive, ws)
+	delete(s.recoveryAudits, ws)
 
 	return nil
 }
@@ -691,6 +721,13 @@ func (s *MemoryStore) ReconcileAuthoritativeBatch(ctx context.Context, params Au
 	if ws == "" {
 		return nil, ErrInvalidWorkspace
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reconcileAuthoritativeBatchLocked(params)
+}
+
+func (s *MemoryStore) reconcileAuthoritativeBatchLocked(params AuthoritativeBatchParams) (*AuthoritativeBatchResult, error) {
+	ws := strings.TrimSpace(params.WorkspaceID)
 	clusterID := strings.TrimSpace(params.ClusterID)
 	if clusterID == "" {
 		clusterID = "default"
@@ -700,8 +737,12 @@ func (s *MemoryStore) ReconcileAuthoritativeBatch(ctx context.Context, params Au
 		samplingAt = time.Now().UTC()
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Fail closed if workspace is in an incomplete or failed recovery state
+	if st, ok := s.recoveryStatus[ws]; ok {
+		if st.Status == "FAILED" {
+			return nil, fmt.Errorf("%w: workspace %q has a failed recovery that must be resolved before reconciliation: %s", ErrWorkspaceRecoveryRequired, ws, st.ErrorMessage)
+		}
+	}
 
 	// 1. Race-safe authority initialization
 	cMap, ok := s.authorities[ws]
@@ -988,4 +1029,573 @@ func (s *MemoryStore) ReconcileAuthoritativeBatch(ctx context.Context, params Au
 	}
 
 	return result, nil
+}
+
+func (s *MemoryStore) loadAssembledStateLocked(ws string) *AssembledState {
+	var resources []Resource
+	if resMap, ok := s.resources[ws]; ok {
+		resources = make([]Resource, 0, len(resMap))
+		for _, r := range resMap {
+			resources = append(resources, r)
+		}
+		sort.Slice(resources, func(i, j int) bool {
+			return resources[i].Identity.String() < resources[j].Identity.String()
+		})
+	}
+
+	var relationships []Relationship
+	if relMap, ok := s.relationships[ws]; ok {
+		relationships = make([]Relationship, 0, len(relMap))
+		for _, rel := range relMap {
+			relationships = append(relationships, rel)
+		}
+		sort.Slice(relationships, func(i, j int) bool {
+			return relationships[i].Key().String() < relationships[j].Key().String()
+		})
+	}
+
+	var evidence []Evidence
+	if evMap, ok := s.evidence[ws]; ok {
+		evidence = make([]Evidence, 0, len(evMap))
+		for _, ev := range evMap {
+			evidence = append(evidence, ev)
+		}
+		sort.Slice(evidence, func(i, j int) bool {
+			return evidence[i].ID < evidence[j].ID
+		})
+	}
+
+	prov := make(map[RelationshipKey][]string)
+	wsProv := s.relToEvidence[ws]
+	for _, rel := range relationships {
+		k := rel.Key()
+		evs := wsProv[k.String()]
+		sortedEvs := make([]string, len(evs))
+		copy(sortedEvs, evs)
+		sort.Strings(sortedEvs)
+		prov[k] = sortedEvs
+	}
+
+	var diagnostics []DiagnosticItem
+	if diagMap, ok := s.diagnostics[ws]; ok {
+		for _, d := range diagMap {
+			if !d.Resolved {
+				diagnostics = append(diagnostics, d)
+			}
+		}
+		sort.Slice(diagnostics, func(i, j int) bool {
+			return diagnostics[i].NaturalKey() < diagnostics[j].NaturalKey()
+		})
+	}
+
+	return &AssembledState{
+		WorkspaceID:   ws,
+		Resources:     resources,
+		Relationships: relationships,
+		Evidence:      evidence,
+		Provenance:    prov,
+		Diagnostics:   diagnostics,
+	}
+}
+
+// GetEvidence retrieves a single evidence record by ID.
+func (s *MemoryStore) GetEvidence(ctx context.Context, workspaceID string, evidenceID string) (*Evidence, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if evMap, ok := s.evidence[ws]; ok {
+		if ev, found := evMap[evidenceID]; found {
+			evCopy := ev
+			return &evCopy, nil
+		}
+	}
+	return nil, ErrResourceNotFound
+}
+
+// GetOutgoingRelationships returns relationships originating from source.
+func (s *MemoryStore) GetOutgoingRelationships(ctx context.Context, workspaceID string, source ResourceIdentity) ([]Relationship, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []Relationship
+	if relMap, ok := s.relationships[ws]; ok {
+		for _, rel := range relMap {
+			if rel.Source == source {
+				out = append(out, rel)
+			}
+		}
+	}
+	return out, nil
+}
+
+// InspectWorkspaceIntegrity inspects all identity-bearing state for workspaceID and returns a detailed report.
+func (s *MemoryStore) InspectWorkspaceIntegrity(ctx context.Context, workspaceID string) (*WorkspaceIntegrityReport, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rep := &WorkspaceIntegrityReport{
+		WorkspaceID: ws,
+		IsClean:     true,
+	}
+
+	// 1. Check durable recovery state machine: fail closed if interrupted or previously failed
+	if st, ok := s.recoveryStatus[ws]; ok {
+		if st.Status == "IN_PROGRESS" {
+			rep.IsClean = false
+			rep.RecoveryRequired = true
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q recovery is currently in-progress or interrupted", ws))
+		} else if st.Status == "FAILED" {
+			rep.IsClean = false
+			rep.RecoveryRequired = true
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q previous recovery failed: %s", ws, st.ErrorMessage))
+		}
+	}
+
+	state := s.loadAssembledStateLocked(ws)
+
+	// 2. Inspect resources
+	for _, r := range state.Resources {
+		if IsKubernetesProvider(r.Identity.Provider) {
+			if err := ValidatePersistedKubernetesIdentity(r.Identity); err != nil {
+				rep.LegacyResourcesCount++
+				rep.IsClean = false
+				rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("resource %s: %v", r.Identity, err))
+			}
+		}
+	}
+
+	// 3. Inspect relationships and cross-cluster links
+	for _, rel := range state.Relationships {
+		var srcCluster, tgtCluster string
+		isLegacy := false
+		if IsKubernetesProvider(rel.Source.Provider) {
+			if err := ValidatePersistedKubernetesIdentity(rel.Source); err != nil {
+				isLegacy = true
+				rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("relationship source %s: %v", rel.Source, err))
+			} else {
+				srcCluster, _, _, _ = ParseKubernetesProviderID(rel.Source.ProviderID, IsClusterScoped(rel.Source.ResourceType))
+			}
+		}
+		if IsKubernetesProvider(rel.Target.Provider) {
+			if err := ValidatePersistedKubernetesIdentity(rel.Target); err != nil {
+				isLegacy = true
+				rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("relationship target %s: %v", rel.Target, err))
+			} else {
+				tgtCluster, _, _, _ = ParseKubernetesProviderID(rel.Target.ProviderID, IsClusterScoped(rel.Target.ResourceType))
+			}
+		}
+		if isLegacy {
+			rep.LegacyRelationshipsCount++
+			rep.IsClean = false
+		}
+		if srcCluster != "" && tgtCluster != "" && srcCluster != tgtCluster {
+			rep.CrossClusterRelationsCount++
+			rep.IsClean = false
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("cross-cluster relationship: source cluster %q != target cluster %q", srcCluster, tgtCluster))
+		}
+	}
+
+	// 4. Inspect diagnostics
+	for _, d := range state.Diagnostics {
+		isLegacy := false
+		if d.Subject != nil && IsKubernetesProvider(d.Subject.Provider) {
+			if err := ValidatePersistedKubernetesIdentity(*d.Subject); err != nil {
+				isLegacy = true
+				rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("diagnostic subject %s: %v", d.Subject, err))
+			}
+		}
+		if d.ReferencedResource != nil && IsKubernetesProvider(d.ReferencedResource.Provider) {
+			if err := ValidatePersistedKubernetesIdentity(*d.ReferencedResource); err != nil {
+				isLegacy = true
+				rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("diagnostic referenced %s: %v", d.ReferencedResource, err))
+			}
+		}
+		if isLegacy {
+			rep.LegacyDiagnosticsCount++
+			rep.IsClean = false
+		}
+	}
+
+	// 5. Invariant 8: Check whether there are archived clusters awaiting canonical recollection
+	if len(s.legacyResourcesArchive[ws]) > 0 {
+		activeCanonical := 0
+		if resMap, ok := s.resources[ws]; ok {
+			for _, r := range resMap {
+				if IsKubernetesProvider(r.Identity.Provider) {
+					if err := ValidatePersistedKubernetesIdentity(r.Identity); err == nil {
+						activeCanonical++
+					}
+				}
+			}
+		}
+		if activeCanonical == 0 {
+			rep.IsClean = false
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q has archived legacy state awaiting canonical recollection", ws))
+		}
+	}
+
+	return rep, nil
+}
+
+// CheckWorkspaceIntegrity inspects all identity-bearing state for workspaceID and reports whether it is safe for analysis.
+func (s *MemoryStore) CheckWorkspaceIntegrity(ctx context.Context, workspaceID string) error {
+	rep, err := s.InspectWorkspaceIntegrity(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	if !rep.IsClean {
+		if rep.RecoveryRequired {
+			return fmt.Errorf("%w: %w: %s", ErrWorkspaceRecoveryRequired, ErrLegacyStateIncompatible, strings.Join(rep.IntegrityErrors, "; "))
+		}
+		if rep.CrossClusterRelationsCount > 0 && rep.LegacyResourcesCount == 0 && rep.LegacyRelationshipsCount == 0 && rep.LegacyDiagnosticsCount == 0 {
+			return fmt.Errorf("%w: %s", ErrCrossClusterRelationship, strings.Join(rep.IntegrityErrors, "; "))
+		}
+		return fmt.Errorf("%w: %s", ErrLegacyStateIncompatible, strings.Join(rep.IntegrityErrors, "; "))
+	}
+	return nil
+}
+
+// RecoverWorkspaceLegacyState archives legacy Kubernetes state and safely restores canonical state via recollection.
+func (s *MemoryStore) RecoverWorkspaceLegacyState(ctx context.Context, params LegacyRecoveryParams) (*LegacyRecoveryResult, error) {
+	ws := strings.TrimSpace(params.WorkspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	startedAt := time.Now().UTC()
+	opID := fmt.Sprintf("rec-op-%d", time.Now().UnixNano())
+
+	opIdentity, authErr := ValidateRecoveryAuthorization(ctx, params)
+	if authErr != nil {
+		s.mu.Lock()
+		s.recoveryAudits[ws] = append(s.recoveryAudits[ws], RecoveryAuditRecord{
+			ID:               int64(len(s.recoveryAudits[ws]) + 1),
+			OperationID:      opID,
+			WorkspaceID:      ws,
+			ClusterID:        params.ClusterID,
+			OperatorIdentity: params.OperatorIdentity,
+			Reason:           params.Reason,
+			Status:           "FAILED",
+			FailureCategory:  "AUTHENTICATION_AUTHORIZATION",
+			ErrorMessage:     authErr.Error(),
+			StartedAt:        startedAt,
+			CompletedAt:      time.Now().UTC(),
+		})
+		s.mu.Unlock()
+		return nil, authErr
+	}
+
+	clusterID := strings.TrimSpace(params.ClusterID)
+	if clusterID == "" && len(params.TargetClusterIDs) > 0 {
+		clusterID = strings.TrimSpace(params.TargetClusterIDs[0])
+	}
+	if clusterID == "" {
+		return nil, fmt.Errorf("recovery requires non-empty cluster_id")
+	}
+	if strings.Contains(clusterID, "/") {
+		return nil, fmt.Errorf("%w: cluster_id %q cannot contain slashes", ErrMalformedProviderID, clusterID)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Enter durable in-progress state
+	s.recoveryStatus[ws] = memoryRecoveryStatus{
+		WorkspaceID:      ws,
+		ClusterID:        clusterID,
+		OperationID:      opID,
+		Status:           "IN_PROGRESS",
+		OperatorIdentity: opIdentity,
+		StartedAt:        startedAt,
+		UpdatedAt:        time.Now().UTC(),
+	}
+
+	result := &LegacyRecoveryResult{
+		WorkspaceID: ws,
+		ClusterID:   clusterID,
+		CompletedAt: time.Now().UTC(),
+	}
+
+	// 1. Inspect resources
+	resMap, hasRes := s.resources[ws]
+	var legacyResources []Resource
+	if hasRes {
+		for _, r := range resMap {
+			if IsKubernetesProvider(r.Identity.Provider) {
+				if err := ValidatePersistedKubernetesIdentity(r.Identity); err != nil {
+					legacyResources = append(legacyResources, r)
+				}
+			} else {
+				result.NonK8sResourcesPreserved++
+			}
+		}
+	}
+
+	// 2. Inspect relationships
+	relMap, hasRel := s.relationships[ws]
+	var legacyRelationships []Relationship
+	if hasRel {
+		for _, rel := range relMap {
+			isLegacy := false
+			if IsKubernetesProvider(rel.Source.Provider) {
+				if err := ValidatePersistedKubernetesIdentity(rel.Source); err != nil {
+					isLegacy = true
+				}
+			}
+			if IsKubernetesProvider(rel.Target.Provider) {
+				if err := ValidatePersistedKubernetesIdentity(rel.Target); err != nil {
+					isLegacy = true
+				}
+			}
+			if isLegacy {
+				legacyRelationships = append(legacyRelationships, rel)
+			} else if !IsKubernetesProvider(rel.Source.Provider) && !IsKubernetesProvider(rel.Target.Provider) {
+				result.NonK8sRelationshipsPreserved++
+			}
+		}
+	}
+
+	// 3. Inspect diagnostics
+	diagMap, hasDiag := s.diagnostics[ws]
+	var legacyDiagnostics []DiagnosticItem
+	if hasDiag {
+		for _, d := range diagMap {
+			isLegacy := false
+			if d.Subject != nil && IsKubernetesProvider(d.Subject.Provider) {
+				if err := ValidatePersistedKubernetesIdentity(*d.Subject); err != nil {
+					isLegacy = true
+				}
+			}
+			if d.ReferencedResource != nil && IsKubernetesProvider(d.ReferencedResource.Provider) {
+				if err := ValidatePersistedKubernetesIdentity(*d.ReferencedResource); err != nil {
+					isLegacy = true
+				}
+			}
+			if isLegacy {
+				legacyDiagnostics = append(legacyDiagnostics, d)
+			}
+		}
+	}
+
+	// 4. Invariant 8: If legacy records exist, an authoritative canonical batch is required.
+	hasLegacy := len(legacyResources) > 0 || len(legacyRelationships) > 0 || len(legacyDiagnostics) > 0
+	if hasLegacy && params.AuthoritativeBatch == nil {
+		err := fmt.Errorf("%w: legacy state cannot be archived without providing authoritative canonical batch for recollection", ErrLegacyStateIncompatible)
+		s.recoveryStatus[ws] = memoryRecoveryStatus{
+			WorkspaceID:      ws,
+			ClusterID:        clusterID,
+			OperationID:      opID,
+			Status:           "FAILED",
+			OperatorIdentity: opIdentity,
+			StartedAt:        startedAt,
+			UpdatedAt:        time.Now().UTC(),
+			ErrorMessage:     err.Error(),
+		}
+		s.recoveryAudits[ws] = append(s.recoveryAudits[ws], RecoveryAuditRecord{
+			ID:               int64(len(s.recoveryAudits[ws]) + 1),
+			OperationID:      opID,
+			WorkspaceID:      ws,
+			ClusterID:        clusterID,
+			OperatorIdentity: opIdentity,
+			Reason:           params.Reason,
+			Status:           "FAILED",
+			ErrorMessage:     err.Error(),
+			StartedAt:        startedAt,
+			CompletedAt:      time.Now().UTC(),
+		})
+		return nil, err
+	}
+
+	// 5. Count immutable evidence (Invariant C)
+	if evMap, ok := s.evidence[ws]; ok {
+		result.EvidencePreservedCount = len(evMap)
+	}
+
+	// Create complete snapshot backups for safe rollback on failure
+	backupRes := make(map[string]Resource)
+	for k, v := range resMap {
+		backupRes[k] = v
+	}
+	backupRel := make(map[string]Relationship)
+	for k, v := range relMap {
+		backupRel[k] = v
+	}
+	backupDiag := make(map[string]DiagnosticItem)
+	for k, v := range diagMap {
+		backupDiag[k] = v
+	}
+	backupRelToEv := make(map[string][]string)
+	if r2e, ok := s.relToEvidence[ws]; ok {
+		for k, v := range r2e {
+			backupRelToEv[k] = append([]string(nil), v...)
+		}
+	}
+	backupEvToRel := make(map[string][]RelationshipKey)
+	if e2r, ok := s.evToRel[ws]; ok {
+		for k, v := range e2r {
+			backupEvToRel[k] = append([]RelationshipKey(nil), v...)
+		}
+	}
+	backupArchivedRes := append([]Resource(nil), s.legacyResourcesArchive[ws]...)
+	backupArchivedRel := append([]Relationship(nil), s.legacyRelationshipsArchive[ws]...)
+	backupArchivedProv := append([]ProvenanceAssociation(nil), s.legacyProvenanceArchive[ws]...)
+	backupArchivedDiag := append([]DiagnosticItem(nil), s.legacyDiagnosticsArchive[ws]...)
+
+	recordFailure := func(err error) {
+		s.resources[ws] = backupRes
+		s.relationships[ws] = backupRel
+		s.diagnostics[ws] = backupDiag
+		s.relToEvidence[ws] = backupRelToEv
+		s.evToRel[ws] = backupEvToRel
+		s.legacyResourcesArchive[ws] = backupArchivedRes
+		s.legacyRelationshipsArchive[ws] = backupArchivedRel
+		s.legacyProvenanceArchive[ws] = backupArchivedProv
+		s.legacyDiagnosticsArchive[ws] = backupArchivedDiag
+
+		s.recoveryStatus[ws] = memoryRecoveryStatus{
+			WorkspaceID:      ws,
+			ClusterID:        clusterID,
+			OperationID:      opID,
+			Status:           "FAILED",
+			OperatorIdentity: opIdentity,
+			StartedAt:        startedAt,
+			UpdatedAt:        time.Now().UTC(),
+			ErrorMessage:     err.Error(),
+		}
+		s.recoveryAudits[ws] = append(s.recoveryAudits[ws], RecoveryAuditRecord{
+			ID:               int64(len(s.recoveryAudits[ws]) + 1),
+			OperationID:      opID,
+			WorkspaceID:      ws,
+			ClusterID:        clusterID,
+			OperatorIdentity: opIdentity,
+			Reason:           params.Reason,
+			Status:           "FAILED",
+			FailureCategory:  "RECOVERY_EXECUTION",
+			ErrorMessage:     err.Error(),
+			StartedAt:        startedAt,
+			CompletedAt:      time.Now().UTC(),
+		})
+	}
+
+	// 6. Archive and delete legacy resources
+	for _, r := range legacyResources {
+		s.legacyResourcesArchive[ws] = append(s.legacyResourcesArchive[ws], r)
+		delete(s.resources[ws], r.Identity.String())
+		result.LegacyResourcesArchived++
+	}
+
+	// 7. Archive and delete legacy relationships and provenance
+	for _, rel := range legacyRelationships {
+		s.legacyRelationshipsArchive[ws] = append(s.legacyRelationshipsArchive[ws], rel)
+		relKey := rel.Key()
+		relStr := relKey.String()
+		if evIDs, ok := s.relToEvidence[ws][relStr]; ok {
+			for _, id := range evIDs {
+				s.legacyProvenanceArchive[ws] = append(s.legacyProvenanceArchive[ws], ProvenanceAssociation{
+					WorkspaceID:  ws,
+					Relationship: relKey,
+					EvidenceID:   id,
+				})
+			}
+			result.LegacyProvenanceArchived += len(evIDs)
+			delete(s.relToEvidence[ws], relStr)
+		}
+		delete(s.relationships[ws], relStr)
+		result.LegacyRelationshipsArchived++
+	}
+
+	// 8. Archive and delete legacy diagnostics
+	for _, d := range legacyDiagnostics {
+		s.legacyDiagnosticsArchive[ws] = append(s.legacyDiagnosticsArchive[ws], d)
+		delete(s.diagnostics[ws], d.NaturalKey())
+		result.LegacyDiagnosticsArchived++
+	}
+
+	// 9. If an authoritative batch is provided, reconcile it
+	if params.AuthoritativeBatch != nil {
+		bParams := *params.AuthoritativeBatch
+		bParams.WorkspaceID = ws
+		bParams.ClusterID = clusterID
+		batchRes, err := s.reconcileAuthoritativeBatchLocked(bParams)
+		if err != nil {
+			recordFailure(err)
+			return nil, fmt.Errorf("recollection batch failed during recovery: %w", err)
+		}
+		result.RecollectionResult = batchRes
+		result.RecollectedResourcesCount = len(bParams.Resources)
+	}
+
+	// 10. Final integrity validation on post-recovery state
+	assembledState := s.loadAssembledStateLocked(ws)
+	if err := ValidateAssembledStateIntegrity(assembledState); err != nil {
+		recordFailure(err)
+		return nil, fmt.Errorf("post-recovery integrity validation failed: %w", err)
+	}
+
+	// Update aliases
+	result.ArchivedResourcesCount = result.LegacyResourcesArchived
+	result.ArchivedRelationshipsCount = result.LegacyRelationshipsArchived
+
+	// Transition to COMPLETED state
+	s.recoveryStatus[ws] = memoryRecoveryStatus{
+		WorkspaceID:      ws,
+		ClusterID:        clusterID,
+		OperationID:      opID,
+		Status:           "COMPLETED",
+		OperatorIdentity: opIdentity,
+		StartedAt:        startedAt,
+		UpdatedAt:        time.Now().UTC(),
+	}
+
+	// Record SUCCESS audit
+	s.recoveryAudits[ws] = append(s.recoveryAudits[ws], RecoveryAuditRecord{
+		ID:                          int64(len(s.recoveryAudits[ws]) + 1),
+		OperationID:                 opID,
+		WorkspaceID:                 ws,
+		ClusterID:                   clusterID,
+		OperatorIdentity:            opIdentity,
+		Reason:                      params.Reason,
+		Status:                      "SUCCESS",
+		LegacyResourcesArchived:     result.LegacyResourcesArchived,
+		LegacyRelationshipsArchived: result.LegacyRelationshipsArchived,
+		LegacyProvenanceArchived:    result.LegacyProvenanceArchived,
+		LegacyDiagnosticsArchived:   result.LegacyDiagnosticsArchived,
+		RecollectedResourcesCount:   result.RecollectedResourcesCount,
+		EvidencePreservedCount:      result.EvidencePreservedCount,
+		StartedAt:                   startedAt,
+		CompletedAt:                 time.Now().UTC(),
+	})
+
+	return result, nil
+}
+
+// ListRecoveryAudits retrieves historical recovery audit records for a workspace.
+func (s *MemoryStore) ListRecoveryAudits(ctx context.Context, workspaceID string) ([]RecoveryAuditRecord, error) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return nil, ErrInvalidWorkspace
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	audits := s.recoveryAudits[ws]
+	if len(audits) == 0 {
+		return []RecoveryAuditRecord{}, nil
+	}
+	out := make([]RecoveryAuditRecord, len(audits))
+	copy(out, audits)
+	return out, nil
 }
