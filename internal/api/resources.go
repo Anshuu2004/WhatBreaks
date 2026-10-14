@@ -124,6 +124,14 @@ func (s *Server) handleListResources() http.HandlerFunc {
 			return
 		}
 
+		if checker, ok := s.cfg.Store.(state.WorkspaceIntegrityChecker); ok {
+			if err := checker.CheckWorkspaceIntegrity(r.Context(), wsID); err != nil {
+				s.logger.Warn("Refusing resource listing: workspace contains un-migrated legacy state", "workspace_id", wsID, "error", err)
+				writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), "IDENTITY_INTEGRITY_REJECTED")
+				return
+			}
+		}
+
 		resources, err := s.cfg.Store.ListResources(r.Context(), wsID)
 		if err != nil {
 			s.logger.Error("Failed to list resources from store", "workspace_id", wsID, "error", err)
@@ -183,6 +191,14 @@ func (s *Server) handleResourceDetail() http.HandlerFunc {
 			return
 		}
 
+		if checker, ok := s.cfg.Store.(state.WorkspaceIntegrityChecker); ok {
+			if err := checker.CheckWorkspaceIntegrity(r.Context(), wsID); err != nil {
+				s.logger.Warn("Refusing resource detail: workspace contains un-migrated legacy state", "workspace_id", wsID, "error", err)
+				writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), "IDENTITY_INTEGRITY_REJECTED")
+				return
+			}
+		}
+
 		provider := strings.TrimSpace(r.URL.Query().Get("provider"))
 		resourceType := strings.TrimSpace(r.URL.Query().Get("resource_type"))
 		providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
@@ -190,6 +206,15 @@ func (s *Server) handleResourceDetail() http.HandlerFunc {
 		if provider == "" || resourceType == "" || providerID == "" {
 			writeErrorResponse(w, http.StatusBadRequest, "Query parameters 'provider', 'resource_type', and 'provider_id' are required", "VALIDATION_ERROR")
 			return
+		}
+
+		prov := strings.ToLower(provider)
+		if prov == "kubernetes" || prov == "k8s" {
+			class, err := state.ClassifyKubernetesProviderID(resourceType, providerID)
+			if err != nil || class.IsLegacy || class.IsAmbiguous {
+				writeErrorResponse(w, http.StatusUnprocessableEntity, "Resource identity is legacy or ambiguous", "IDENTITY_INTEGRITY_REJECTED")
+				return
+			}
 		}
 
 		identity := state.ResourceIdentity{

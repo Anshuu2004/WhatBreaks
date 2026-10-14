@@ -29,6 +29,10 @@ func (m *mockCoreClient) AnalyzeImpact(ctx context.Context, req *corev1.AnalyzeI
 	return m.resp, nil
 }
 
+func (m *mockCoreClient) InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error) {
+	return &corev1.InvalidateWorkspaceResponse{WorkspaceId: req.WorkspaceId, Invalidated: true}, nil
+}
+
 // ---------------------------------------------------------------------------
 // Test 16: correct conversion to core request
 // ---------------------------------------------------------------------------
@@ -38,7 +42,7 @@ func TestService_CorrectConversionToCoreRequest(t *testing.T) {
 			Target: &corev1.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderId:   "payments/api",
+				ProviderId:   "cluster-1/payments/api",
 			},
 			Summary: &corev1.ImpactSummary{
 				ImpactedCount: 0,
@@ -52,7 +56,7 @@ func TestService_CorrectConversionToCoreRequest(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "payments/api",
+			ProviderID:   "cluster-1/payments/api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -76,8 +80,8 @@ func TestService_CorrectConversionToCoreRequest(t *testing.T) {
 	if mock.lastReq.Target.ResourceType != "pod" {
 		t.Errorf("expected resource_type pod, got %s", mock.lastReq.Target.ResourceType)
 	}
-	if mock.lastReq.Target.ProviderId != "payments/api" {
-		t.Errorf("expected provider_id payments/api, got %s", mock.lastReq.Target.ProviderId)
+	if mock.lastReq.Target.ProviderId != "cluster-1/payments/api" {
+		t.Errorf("expected provider_id cluster-1/payments/api, got %s", mock.lastReq.Target.ProviderId)
 	}
 	if mock.lastReq.Direction != "incoming" {
 		t.Errorf("expected direction incoming, got %s", mock.lastReq.Direction)
@@ -96,7 +100,7 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 			Target: &corev1.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderId:   "payments/api",
+				ProviderId:   "cluster-1/payments/api",
 			},
 			Summary: &corev1.ImpactSummary{
 				ImpactedCount: 1,
@@ -109,7 +113,7 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 					Resource: &corev1.ResourceIdentity{
 						Provider:     "kubernetes",
 						ResourceType: "pod",
-						ProviderId:   "payments/orders",
+						ProviderId:   "cluster-1/payments/orders",
 					},
 					Depth: 1,
 				},
@@ -120,12 +124,12 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 						Source: &corev1.ResourceIdentity{
 							Provider:     "kubernetes",
 							ResourceType: "pod",
-							ProviderId:   "payments/orders",
+							ProviderId:   "cluster-1/payments/orders",
 						},
 						Target: &corev1.ResourceIdentity{
 							Provider:     "kubernetes",
 							ResourceType: "pod",
-							ProviderId:   "payments/api",
+							ProviderId:   "cluster-1/payments/api",
 						},
 						Kind:     "DEPENDS_ON",
 						Category: "Dependency",
@@ -137,13 +141,13 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 			Paths: []*corev1.ImpactPath{
 				{
 					Resources: []*corev1.ResourceIdentity{
-						{Provider: "kubernetes", ResourceType: "pod", ProviderId: "payments/api"},
-						{Provider: "kubernetes", ResourceType: "pod", ProviderId: "payments/orders"},
+						{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/payments/api"},
+						{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/payments/orders"},
 					},
 					Relationships: []*corev1.Relationship{
 						{
-							Source:   &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderId: "payments/orders"},
-							Target:   &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderId: "payments/api"},
+							Source:   &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/payments/orders"},
+							Target:   &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/payments/api"},
 							Kind:     "DEPENDS_ON",
 							Category: "Dependency",
 						},
@@ -165,8 +169,8 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 				{
 					Path: &corev1.ImpactPath{
 						Resources: []*corev1.ResourceIdentity{
-							{Provider: "kubernetes", ResourceType: "pod", ProviderId: "payments/api"},
-							{Provider: "kubernetes", ResourceType: "pod", ProviderId: "payments/orders"},
+							{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/payments/api"},
+							{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/payments/orders"},
 						},
 					},
 					EvidenceIds: []string{"550e8400-e29b-41d4-a716-446655440001"},
@@ -180,7 +184,7 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "payments/api",
+			ProviderID:   "cluster-1/payments/api",
 		},
 		Direction: "incoming",
 		MaxDepth:  2,
@@ -190,15 +194,15 @@ func TestService_CorrectConversionFromCoreResponse(t *testing.T) {
 	}
 
 	// Verify target
-	if ans.Target.ProviderID != "payments/api" {
-		t.Errorf("expected target payments/api, got %s", ans.Target.ProviderID)
+	if ans.Target.ProviderID != "cluster-1/payments/api" {
+		t.Errorf("expected target cluster-1/payments/api, got %s", ans.Target.ProviderID)
 	}
 	// Verify summary
 	if ans.Summary.ImpactedCount != 1 || ans.Summary.DirectCount != 1 || ans.Summary.MaxDepth != 1 {
 		t.Errorf("unexpected summary: %+v", ans.Summary)
 	}
 	// Verify impacted resources
-	if len(ans.ImpactedResources) != 1 || ans.ImpactedResources[0].Resource.ProviderID != "payments/orders" {
+	if len(ans.ImpactedResources) != 1 || ans.ImpactedResources[0].Resource.ProviderID != "cluster-1/payments/orders" {
 		t.Errorf("unexpected impacted resources: %+v", ans.ImpactedResources)
 	}
 	// Verify relationship and state lowercased
@@ -315,7 +319,7 @@ func TestService_ErrorPropagation(t *testing.T) {
 				Target: &answer.ResourceIdentity{
 					Provider:     "kubernetes",
 					ResourceType: "pod",
-					ProviderID:   "payments/api",
+					ProviderID:   "cluster-1/payments/api",
 				},
 				Direction: "incoming",
 				MaxDepth:  5,
@@ -348,7 +352,7 @@ func TestService_DeterministicResponse(t *testing.T) {
 			Target: &corev1.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderId:   "payments/api",
+				ProviderId:   "cluster-1/payments/api",
 			},
 			Summary: &corev1.ImpactSummary{
 				ImpactedCount: 2,
@@ -374,7 +378,7 @@ func TestService_DeterministicResponse(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "payments/api",
+			ProviderID:   "cluster-1/payments/api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -407,7 +411,7 @@ func TestService_ChangeAwareTranslation(t *testing.T) {
 			Target: &corev1.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "configmap",
-				ProviderId:   "backend-config",
+				ProviderId:   "cluster-1/default/backend-config",
 			},
 			Summary: &corev1.ImpactSummary{
 				ImpactedCount: 1,
@@ -417,7 +421,7 @@ func TestService_ChangeAwareTranslation(t *testing.T) {
 			},
 			ImpactedResources: []*corev1.ImpactedResource{
 				{
-					Resource:     &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderId: "backend-pod"},
+					Resource:     &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderId: "cluster-1/default/backend-pod"},
 					Depth:        1,
 					ImpactType:   "DIRECT",
 					ImpactReason: "Direct dependent via DEPENDS_ON: may require reload or restart to consume updated target state",
@@ -437,7 +441,7 @@ func TestService_ChangeAwareTranslation(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "configmap",
-			ProviderID:   "backend-config",
+			ProviderID:   "cluster-1/default/backend-config",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -520,7 +524,7 @@ func TestService_ChangeAware_ScaleZeroImpacts(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -555,7 +559,7 @@ func TestService_ChangeAware_ReplaceTranslation(t *testing.T) {
 			Target: &corev1.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "service",
-				ProviderId:   "payments-api",
+				ProviderId:   "cluster-1/default/payments-api",
 			},
 			Summary: &corev1.ImpactSummary{
 				ImpactedCount: 1,
@@ -564,7 +568,7 @@ func TestService_ChangeAware_ReplaceTranslation(t *testing.T) {
 			},
 			ImpactedResources: []*corev1.ImpactedResource{
 				{
-					Resource:     &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderId: "checkout-service"},
+					Resource:     &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderId: "cluster-1/default/checkout-service"},
 					Depth:        1,
 					ImpactType:   "DIRECT",
 					ImpactReason: "Direct connection via DEPENDS_ON: subject to transient rollover or reconnection during replacement",
@@ -584,7 +588,7 @@ func TestService_ChangeAware_ReplaceTranslation(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -616,7 +620,7 @@ func TestService_LegacyRequest_PreservesNilAssessmentAndEmptyFields(t *testing.T
 			Target: &corev1.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "service",
-				ProviderId:   "payments-api",
+				ProviderId:   "cluster-1/default/payments-api",
 			},
 			Summary: &corev1.ImpactSummary{
 				ImpactedCount: 1,
@@ -625,7 +629,7 @@ func TestService_LegacyRequest_PreservesNilAssessmentAndEmptyFields(t *testing.T
 			},
 			ImpactedResources: []*corev1.ImpactedResource{
 				{
-					Resource: &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderId: "checkout-service"},
+					Resource: &corev1.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderId: "cluster-1/default/checkout-service"},
 					Depth:    1,
 				},
 			},
@@ -637,7 +641,7 @@ func TestService_LegacyRequest_PreservesNilAssessmentAndEmptyFields(t *testing.T
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,

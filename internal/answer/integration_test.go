@@ -229,7 +229,7 @@ func TestIntegration_GoAPIToGoAnswerServiceToRustAnswerService(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "payments/payments-api"
+			"provider_id": "cluster-1/default/payments-api"
 		},
 		"direction": "incoming",
 		"max_depth": 3
@@ -288,7 +288,7 @@ func TestIntegration_RealAnswerEngineExecution(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -331,7 +331,7 @@ func TestIntegration_ActualImpactAnswerReturnedThroughHTTP(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "service",
-			"provider_id": "payments-api"
+			"provider_id": "cluster-1/default/payments-api"
 		},
 		"direction": "incoming",
 		"max_depth": 5
@@ -348,8 +348,8 @@ func TestIntegration_ActualImpactAnswerReturnedThroughHTTP(t *testing.T) {
 		t.Fatalf("failed to decode ImpactAnswer JSON: %v", err)
 	}
 
-	if ans.Target.ProviderID != "payments-api" {
-		t.Errorf("expected target payments-api, got %s", ans.Target.ProviderID)
+	if ans.Target.ProviderID != "cluster-1/default/payments-api" {
+		t.Errorf("expected target cluster-1/default/payments-api, got %s", ans.Target.ProviderID)
 	}
 	if ans.Summary.ImpactedCount != 2 {
 		t.Errorf("expected 2 impacted resources, got %d", ans.Summary.ImpactedCount)
@@ -370,7 +370,7 @@ func TestIntegration_EvidenceProvenanceSurvivesBoundary(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -394,7 +394,7 @@ func TestIntegration_EvidenceProvenanceSurvivesBoundary(t *testing.T) {
 	// 2. Relationship provenance association survived
 	foundSupportedRel := false
 	for _, rel := range ans.Relationships {
-		if rel.Relationship.Source.ProviderID == "checkout-service" && rel.Relationship.Target.ProviderID == "payments-api" {
+		if rel.Relationship.Source.ProviderID == "cluster-1/default/checkout-service" && rel.Relationship.Target.ProviderID == "cluster-1/default/payments-api" {
 			foundSupportedRel = true
 			if len(rel.EvidenceIDs) != 1 || rel.EvidenceIDs[0] != ev.ID {
 				t.Errorf("expected relationship to be linked to evidence ID %s, got %v", ev.ID, rel.EvidenceIDs)
@@ -417,7 +417,7 @@ func TestIntegration_PathsSurviveBoundary(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -432,13 +432,13 @@ func TestIntegration_PathsSurviveBoundary(t *testing.T) {
 
 	// Direct path: checkout-service -> payments-api
 	path1 := ans.Paths[0]
-	if len(path1.Resources) != 2 || path1.Resources[0].ProviderID != "checkout-service" || path1.Resources[1].ProviderID != "payments-api" {
+	if len(path1.Resources) != 2 || path1.Resources[0].ProviderID != "cluster-1/default/checkout-service" || path1.Resources[1].ProviderID != "cluster-1/default/payments-api" {
 		t.Errorf("unexpected direct path resources: %+v", path1.Resources)
 	}
 
 	// Indirect path: frontend -> checkout-service -> payments-api
 	path2 := ans.Paths[1]
-	if len(path2.Resources) != 3 || path2.Resources[0].ProviderID != "frontend" || path2.Resources[1].ProviderID != "checkout-service" || path2.Resources[2].ProviderID != "payments-api" {
+	if len(path2.Resources) != 3 || path2.Resources[0].ProviderID != "cluster-1/default/frontend" || path2.Resources[1].ProviderID != "cluster-1/default/checkout-service" || path2.Resources[2].ProviderID != "cluster-1/default/payments-api" {
 		t.Errorf("unexpected indirect path resources: %+v", path2.Resources)
 	}
 }
@@ -454,7 +454,7 @@ func TestIntegration_SupportedUnknownStateSurvivesBoundary(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "payments-api",
+			ProviderID:   "cluster-1/default/payments-api",
 		},
 		Direction: "incoming",
 		MaxDepth:  5,
@@ -507,7 +507,7 @@ func TestIntegration_ChangeAwareEndToEnd_DeleteVsUpdateVsScale(t *testing.T) {
 	target := map[string]interface{}{
 		"provider":      "kubernetes",
 		"resource_type": "service",
-		"provider_id":   "payments-api",
+		"provider_id":   "cluster-1/default/payments-api",
 	}
 
 	// 1. Proposed Change: DELETE -> multi-hop reaching checkout-service and frontend
@@ -581,7 +581,7 @@ func TestIntegration_ChangeAwareEndToEnd_DeleteVsUpdateVsScale(t *testing.T) {
 	if ansUpdate.Summary.ImpactedCount != 1 {
 		t.Errorf("UPDATE expected 1 impacted resource (depth 1 only), got %d", ansUpdate.Summary.ImpactedCount)
 	}
-	if ansUpdate.ImpactedResources[0].Resource.ProviderID != "checkout-service" {
+	if ansUpdate.ImpactedResources[0].Resource.ProviderID != "cluster-1/default/checkout-service" {
 		t.Errorf("UPDATE expected checkout-service, got %s", ansUpdate.ImpactedResources[0].Resource.ProviderID)
 	}
 	if ansUpdate.ImpactedResources[0].ImpactType != "DIRECT" {
@@ -662,7 +662,7 @@ func TestIntegration_ChangeAwareEndToEnd_DeleteVsUpdateVsScale(t *testing.T) {
 	if ansReplace.Summary.ImpactedCount != 1 {
 		t.Errorf("REPLACE expected 1 impacted resource (depth 1 only), got %d", ansReplace.Summary.ImpactedCount)
 	}
-	if ansReplace.ImpactedResources[0].Resource.ProviderID != "checkout-service" {
+	if ansReplace.ImpactedResources[0].Resource.ProviderID != "cluster-1/default/checkout-service" {
 		t.Errorf("REPLACE expected checkout-service, got %s", ansReplace.ImpactedResources[0].Resource.ProviderID)
 	}
 	if ansReplace.ImpactedResources[0].ImpactType != "DIRECT" {
@@ -690,7 +690,7 @@ func TestIntegration_ChangeAware_BackwardCompatibilityEndToEnd(t *testing.T) {
 	target := map[string]interface{}{
 		"provider":      "kubernetes",
 		"resource_type": "service",
-		"provider_id":   "payments-api",
+		"provider_id":   "cluster-1/default/payments-api",
 	}
 
 	cases := []struct {

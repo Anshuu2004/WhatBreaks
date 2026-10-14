@@ -20,7 +20,33 @@ var (
 
 	// ErrMalformedCoreResponse is returned when the core engine returns an incomplete or corrupt response.
 	ErrMalformedCoreResponse = errors.New("core engine returned a malformed response")
+
+	// ErrIdentityIntegrityRejected is returned when a query targets or occurs within a workspace
+	// with incompatible legacy/ambiguous Kubernetes state.
+	ErrIdentityIntegrityRejected = errors.New("identity integrity validation rejected: legacy or ambiguous kubernetes identity detected")
 )
+
+// IdentityIntegrityError indicates that a query was rejected because the target identity
+// or workspace contains legacy or ambiguous Kubernetes identities that cannot safely determine impact.
+type IdentityIntegrityError struct {
+	WorkspaceID string
+	Reason      string
+	Err         error
+}
+
+func (e *IdentityIntegrityError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("identity integrity rejected: %s", e.Reason)
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("identity integrity rejected: %v", e.Err)
+	}
+	return "identity integrity rejected"
+}
+
+func (e *IdentityIntegrityError) Unwrap() error {
+	return e.Err
+}
 
 // ValidationError indicates a client-provided parameter is invalid.
 type ValidationError struct {
@@ -43,14 +69,15 @@ type ErrorResponse struct {
 
 // Standard ErrorCode values matching platform conventions.
 const (
-	CodeBadRequest               = "BAD_REQUEST"
-	CodeValidationError          = "VALIDATION_ERROR"
-	CodeUnauthorized             = "UNAUTHORIZED"
-	CodeForbidden                = "FORBIDDEN"
-	CodeNotFound                 = "NOT_FOUND"
-	CodeCoreUnavailable          = "CORE_UNAVAILABLE"
-	CodeWorkspaceNotMaterialized = "WORKSPACE_NOT_MATERIALIZED"
-	CodeCoreTimeout              = "CORE_TIMEOUT"
-	CodeRequestCanceled          = "REQUEST_CANCELED"
-	CodeInternalError            = "INTERNAL_ERROR"
+	CodeBadRequest                = "BAD_REQUEST"
+	CodeValidationError           = "VALIDATION_ERROR"
+	CodeUnauthorized              = "UNAUTHORIZED"
+	CodeForbidden                 = "FORBIDDEN"
+	CodeNotFound                  = "NOT_FOUND"
+	CodeCoreUnavailable           = "CORE_UNAVAILABLE"
+	CodeWorkspaceNotMaterialized  = "WORKSPACE_NOT_MATERIALIZED"
+	CodeCoreTimeout               = "CORE_TIMEOUT"
+	CodeRequestCanceled           = "REQUEST_CANCELED"
+	CodeInternalError             = "INTERNAL_ERROR"
+	CodeIdentityIntegrityRejected = "IDENTITY_INTEGRITY_REJECTED"
 )

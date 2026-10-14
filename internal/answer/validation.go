@@ -3,6 +3,8 @@ package answer
 import (
 	"fmt"
 	"strings"
+
+	"github.com/aaradhychinche-alt/WhatBreaks/internal/state"
 )
 
 const (
@@ -53,6 +55,32 @@ func ValidateImpactRequest(req *ImpactRequest) error {
 		return &ValidationError{
 			Field:   "target.provider_id",
 			Message: "provider_id cannot be empty",
+		}
+	}
+
+	// Validate Kubernetes target identity format: reject legacy/ambiguous targets
+	prov := strings.ToLower(strings.TrimSpace(req.Target.Provider))
+	if prov == "kubernetes" || prov == "k8s" {
+		class, err := state.ClassifyKubernetesProviderID(req.Target.ResourceType, req.Target.ProviderID)
+		if err != nil || class.IsLegacy || class.IsAmbiguous {
+			reason := "target has ambiguous or legacy kubernetes provider_id"
+			if err != nil {
+				reason = err.Error()
+			} else {
+				switch class.Kind {
+				case state.ClassificationLegacyNamespaced:
+					reason = fmt.Sprintf("target is a legacy namespaced kubernetes identity missing cluster prefix: %q", req.Target.ProviderID)
+				case state.ClassificationLegacyClusterScoped:
+					reason = fmt.Sprintf("target is a legacy cluster-scoped kubernetes identity missing cluster prefix: %q", req.Target.ProviderID)
+				case state.ClassificationAmbiguous:
+					reason = fmt.Sprintf("target kubernetes resource type %q has ambiguous scope for identity %q", req.Target.ResourceType, req.Target.ProviderID)
+				}
+			}
+			return &IdentityIntegrityError{
+				WorkspaceID: req.WorkspaceID,
+				Reason:      reason,
+				Err:         ErrIdentityIntegrityRejected,
+			}
 		}
 	}
 

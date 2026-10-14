@@ -17,6 +17,30 @@ import (
 // CoreClient defines the gRPC transport contract required by the AnswerService.
 type CoreClient interface {
 	AnalyzeImpact(ctx context.Context, req *corev1.AnalyzeImpactRequest, opts ...grpc.CallOption) (*corev1.AnalyzeImpactResponse, error)
+	InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error)
+}
+
+// WorkspaceIntegrityChecker defines the contract to verify that a workspace state is clean and canonical.
+type WorkspaceIntegrityChecker interface {
+	CheckWorkspaceIntegrity(ctx context.Context, workspaceID string) error
+}
+
+// Option configures an AnswerService instance.
+type Option func(*service)
+
+// WithWorkspaceIntegrityChecker configures an integrity checker to guard impact queries.
+func WithWorkspaceIntegrityChecker(checker WorkspaceIntegrityChecker) Option {
+	return func(s *service) {
+		s.checker = checker
+	}
+}
+
+// WithRequireIntegrityChecker mandates that an integrity checker must be configured.
+// Missing checker will cause impact queries to fail closed.
+func WithRequireIntegrityChecker() Option {
+	return func(s *service) {
+		s.requireChecker = true
+	}
 }
 
 // Service defines the application-level impact analysis operations.
@@ -25,19 +49,25 @@ type Service interface {
 }
 
 type service struct {
-	client CoreClient
-	logger logging.Logger
+	client         CoreClient
+	checker        WorkspaceIntegrityChecker
+	logger         logging.Logger
+	requireChecker bool
 }
 
 // NewService constructs an AnswerService backed by the given CoreClient and Logger.
-func NewService(client CoreClient, logger logging.Logger) Service {
+func NewService(client CoreClient, logger logging.Logger, opts ...Option) Service {
 	if logger == nil {
 		logger = logging.NewJSONLogger(nil, logging.LevelInfo, "answer-service")
 	}
-	return &service{
+	s := &service{
 		client: client,
 		logger: logger,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // AnalyzeImpact orchestrates the validation, protobuf translation, gRPC invocation,
@@ -45,6 +75,38 @@ func NewService(client CoreClient, logger logging.Logger) Service {
 func (s *service) AnalyzeImpact(ctx context.Context, req ImpactRequest) (*ImpactAnswer, error) {
 	if err := ValidateImpactRequest(&req); err != nil {
 		return nil, err
+	}
+
+	// Refuse false-negative zero-impact queries if workspace has un-migrated legacy state or missing checker in production
+	if s.checker == nil {
+		if s.requireChecker {
+			s.logger.Error("Refusing impact query: workspace integrity checker is required but not configured",
+				"workspace_id", req.WorkspaceID,
+			)
+			return nil, &IdentityIntegrityError{
+				WorkspaceID: req.WorkspaceID,
+				Reason:      "workspace integrity checker is not configured; refusing to serve unchecked workspace state",
+				Err:         ErrIdentityIntegrityRejected,
+			}
+		}
+	} else if strings.TrimSpace(req.WorkspaceID) != "" {
+		if err := s.checker.CheckWorkspaceIntegrity(ctx, req.WorkspaceID); err != nil {
+			s.logger.Warn("Refusing impact query: workspace contains un-migrated legacy state",
+				"workspace_id", req.WorkspaceID,
+				"error", err.Error(),
+			)
+			// Evict the workspace graph from the Rust Core Engine so previously materialized state cannot be served
+			if s.client != nil {
+				_, _ = s.client.InvalidateWorkspace(ctx, &corev1.InvalidateWorkspaceRequest{
+					WorkspaceId: req.WorkspaceID,
+				})
+			}
+			return nil, &IdentityIntegrityError{
+				WorkspaceID: req.WorkspaceID,
+				Reason:      err.Error(),
+				Err:         ErrIdentityIntegrityRejected,
+			}
+		}
 	}
 
 	start := time.Now()
@@ -149,8 +211,15 @@ func mapGRPCError(ctx context.Context, err error) error {
 	case codes.Unavailable:
 		return ErrCoreUnavailable
 	case codes.FailedPrecondition:
-		if strings.Contains(strings.ToLower(st.Message()), "not materialized") {
+		msg := strings.ToLower(st.Message())
+		if strings.Contains(msg, "not materialized") {
 			return ErrWorkspaceNotMaterialized
+		}
+		if strings.Contains(msg, "legacy") || strings.Contains(msg, "identity") || strings.Contains(msg, "incompatible") {
+			return &IdentityIntegrityError{
+				Reason: st.Message(),
+				Err:    ErrIdentityIntegrityRejected,
+			}
 		}
 		return ErrCoreUnavailable
 	case codes.InvalidArgument:

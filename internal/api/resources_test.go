@@ -244,13 +244,45 @@ func TestResourceDetail_NotFound(t *testing.T) {
 	srv := api.NewServer(cfg)
 
 	url := "/api/v1/resources/detail?workspace_id=" + wsID +
-		"&provider=kubernetes&resource_type=pod&provider_id=nonexistent-pod"
+		"&provider=kubernetes&resource_type=pod&provider_id=k3d-cluster/default/nonexistent-pod"
 	req := httptest.NewRequest(http.MethodGet, url, nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 Not Found, got %d", rec.Code)
+	}
+}
+
+func TestResourceDetail_LegacyID_Rejected(t *testing.T) {
+	wsID := "00000000-0000-0000-0000-000000000001"
+	memStore := state.NewMemoryStore()
+
+	cfg := api.DefaultConfig()
+	cfg.IsTest = true
+	cfg.Store = memStore
+	cfg.ConfiguredWorkspaceID = wsID
+	cfg.Logger = logging.NewStandardLogger(nil, logging.LevelWarn)
+
+	srv := api.NewServer(cfg)
+
+	// Single segment legacy ID for namespaced pod should be rejected with 422
+	url := "/api/v1/resources/detail?workspace_id=" + wsID +
+		"&provider=kubernetes&resource_type=pod&provider_id=legacy-pod"
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 Unprocessable Entity, got %d", rec.Code)
+	}
+
+	var errResp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if code, _ := errResp["code"].(string); code != "IDENTITY_INTEGRITY_REJECTED" {
+		t.Errorf("expected code IDENTITY_INTEGRITY_REJECTED, got %s", code)
 	}
 }
 

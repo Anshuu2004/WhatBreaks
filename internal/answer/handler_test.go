@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/answer"
@@ -34,7 +35,7 @@ func defaultValidPayload() []byte {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "payments/payments-api"
+			"provider_id": "cluster-1/payments/payments-api"
 		},
 		"direction": "incoming",
 		"max_depth": 5
@@ -50,7 +51,7 @@ func TestHandler_ValidImpactRequest(t *testing.T) {
 			Target: answer.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderID:   "payments/payments-api",
+				ProviderID:   "cluster-1/payments/payments-api",
 			},
 			Summary: answer.ImpactSummary{
 				ImpactedCount: 0,
@@ -73,8 +74,8 @@ func TestHandler_ValidImpactRequest(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if res.Target.ProviderID != "payments/payments-api" {
-		t.Errorf("expected target payments/payments-api, got %s", res.Target.ProviderID)
+	if res.Target.ProviderID != "cluster-1/payments/payments-api" {
+		t.Errorf("expected target cluster-1/payments/payments-api, got %s", res.Target.ProviderID)
 	}
 }
 
@@ -210,7 +211,7 @@ func TestHandler_InvalidDirection(t *testing.T) {
 	h := answer.NewHandler(&mockService{})
 
 	payload := []byte(`{
-		"target": {"provider": "kubernetes", "resource_type": "pod", "provider_id": "api"},
+		"target": {"provider": "kubernetes", "resource_type": "pod", "provider_id": "cluster-1/default/api"},
 		"direction": "sideways",
 		"max_depth": 5
 	}`)
@@ -237,7 +238,7 @@ func TestHandler_InvalidMaxDepth(t *testing.T) {
 
 	// Depth 0 (below min 1)
 	payload1 := []byte(`{
-		"target": {"provider": "kubernetes", "resource_type": "pod", "provider_id": "api"},
+		"target": {"provider": "kubernetes", "resource_type": "pod", "provider_id": "cluster-1/default/api"},
 		"direction": "incoming",
 		"max_depth": 0
 	}`)
@@ -250,7 +251,7 @@ func TestHandler_InvalidMaxDepth(t *testing.T) {
 
 	// Depth 51 (above max 50)
 	payload2 := []byte(`{
-		"target": {"provider": "kubernetes", "resource_type": "pod", "provider_id": "api"},
+		"target": {"provider": "kubernetes", "resource_type": "pod", "provider_id": "cluster-1/default/api"},
 		"direction": "incoming",
 		"max_depth": 51
 	}`)
@@ -437,7 +438,7 @@ func TestHandler_SuccessfulStructuredResponse(t *testing.T) {
 			Target: answer.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderID:   "payments/payments-api",
+				ProviderID:   "cluster-1/payments/payments-api",
 			},
 			Summary: answer.ImpactSummary{
 				ImpactedCount: 1,
@@ -450,7 +451,7 @@ func TestHandler_SuccessfulStructuredResponse(t *testing.T) {
 					Resource: answer.ResourceIdentity{
 						Provider:     "kubernetes",
 						ResourceType: "pod",
-						ProviderID:   "payments/orders-api",
+						ProviderID:   "cluster-1/payments/orders-api",
 					},
 					Depth: 1,
 				},
@@ -461,12 +462,12 @@ func TestHandler_SuccessfulStructuredResponse(t *testing.T) {
 						Source: answer.ResourceIdentity{
 							Provider:     "kubernetes",
 							ResourceType: "pod",
-							ProviderID:   "payments/orders-api",
+							ProviderID:   "cluster-1/payments/orders-api",
 						},
 						Target: answer.ResourceIdentity{
 							Provider:     "kubernetes",
 							ResourceType: "pod",
-							ProviderID:   "payments/payments-api",
+							ProviderID:   "cluster-1/payments/payments-api",
 						},
 						Kind:     "DEPENDS_ON",
 						Category: "Dependency",
@@ -478,13 +479,13 @@ func TestHandler_SuccessfulStructuredResponse(t *testing.T) {
 			Paths: []answer.ImpactPath{
 				{
 					Resources: []answer.ResourceIdentity{
-						{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
-						{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/orders-api"},
+						{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
+						{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/orders-api"},
 					},
 					Relationships: []answer.Relationship{
 						{
-							Source:   answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/orders-api"},
-							Target:   answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+							Source:   answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/orders-api"},
+							Target:   answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 							Kind:     "DEPENDS_ON",
 							Category: "Dependency",
 						},
@@ -506,8 +507,8 @@ func TestHandler_SuccessfulStructuredResponse(t *testing.T) {
 				{
 					Path: answer.ImpactPath{
 						Resources: []answer.ResourceIdentity{
-							{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
-							{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/orders-api"},
+							{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
+							{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/orders-api"},
 						},
 					},
 					EvidenceIDs: []string{"550e8400-e29b-41d4-a716-446655440001"},
@@ -534,7 +535,7 @@ func TestHandler_SuccessfulStructuredResponse(t *testing.T) {
 	if res.Summary.ImpactedCount != 1 {
 		t.Errorf("expected impacted count 1, got %d", res.Summary.ImpactedCount)
 	}
-	if len(res.ImpactedResources) != 1 || res.ImpactedResources[0].Resource.ProviderID != "payments/orders-api" {
+	if len(res.ImpactedResources) != 1 || res.ImpactedResources[0].Resource.ProviderID != "cluster-1/payments/orders-api" {
 		t.Errorf("unexpected impacted resources: %+v", res.ImpactedResources)
 	}
 	if len(res.Relationships) != 1 || res.Relationships[0].State != "supported" {
@@ -577,7 +578,7 @@ func TestHandler_ValidProposedChange(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "backend-pod"
+			"provider_id": "cluster-1/default/backend-pod"
 		},
 		"direction": "incoming",
 		"max_depth": 3,
@@ -623,7 +624,7 @@ func TestHandler_InvalidProposedChange_Returns400(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "backend-pod"
+			"provider_id": "cluster-1/default/backend-pod"
 		},
 		"direction": "incoming",
 		"max_depth": 3,
@@ -660,12 +661,12 @@ func TestHandler_BackwardCompatibility_OmittedProposedChange(t *testing.T) {
 			Target: answer.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderID:   "backend-pod",
+				ProviderID:   "cluster-1/default/backend-pod",
 			},
 			Summary: answer.ImpactSummary{ImpactedCount: 1, DirectCount: 1},
 			ImpactedResources: []answer.ImpactedResource{
 				{
-					Resource: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "backend-svc"},
+					Resource: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "cluster-1/default/backend-svc"},
 					Depth:    1,
 				},
 			},
@@ -678,7 +679,7 @@ func TestHandler_BackwardCompatibility_OmittedProposedChange(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "backend-pod"
+			"provider_id": "cluster-1/default/backend-pod"
 		},
 		"direction": "incoming",
 		"max_depth": 3
@@ -710,12 +711,12 @@ func TestHandler_BackwardCompatibility_NullProposedChange(t *testing.T) {
 			Target: answer.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderID:   "backend-pod",
+				ProviderID:   "cluster-1/default/backend-pod",
 			},
 			Summary: answer.ImpactSummary{ImpactedCount: 1, DirectCount: 1},
 			ImpactedResources: []answer.ImpactedResource{
 				{
-					Resource: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "backend-svc"},
+					Resource: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "cluster-1/default/backend-svc"},
 					Depth:    1,
 				},
 			},
@@ -728,7 +729,7 @@ func TestHandler_BackwardCompatibility_NullProposedChange(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "backend-pod"
+			"provider_id": "cluster-1/default/backend-pod"
 		},
 		"direction": "incoming",
 		"max_depth": 3,
@@ -756,12 +757,12 @@ func TestHandler_BackwardCompatibility_EmptyObjectProposedChange(t *testing.T) {
 			Target: answer.ResourceIdentity{
 				Provider:     "kubernetes",
 				ResourceType: "pod",
-				ProviderID:   "backend-pod",
+				ProviderID:   "cluster-1/default/backend-pod",
 			},
 			Summary: answer.ImpactSummary{ImpactedCount: 1, DirectCount: 1},
 			ImpactedResources: []answer.ImpactedResource{
 				{
-					Resource: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "backend-svc"},
+					Resource: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "service", ProviderID: "cluster-1/default/backend-svc"},
 					Depth:    1,
 				},
 			},
@@ -774,7 +775,7 @@ func TestHandler_BackwardCompatibility_EmptyObjectProposedChange(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "backend-pod"
+			"provider_id": "cluster-1/default/backend-pod"
 		},
 		"direction": "incoming",
 		"max_depth": 3,
@@ -804,7 +805,7 @@ func TestHandler_EmptyChangeTypeWithDetails_Returns400(t *testing.T) {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "backend-pod"
+			"provider_id": "cluster-1/default/backend-pod"
 		},
 		"direction": "incoming",
 		"max_depth": 3,
@@ -832,7 +833,7 @@ func makeWorkspacePayload(wsID string) []byte {
 		"target": {
 			"provider": "kubernetes",
 			"resource_type": "pod",
-			"provider_id": "payments/payments-api"
+			"provider_id": "cluster-1/payments/payments-api"
 		},
 		"direction": "incoming",
 		"max_depth": 3
@@ -847,7 +848,7 @@ func TestHandler_Auth_MissingTransport_BodyWorkspaceID_Unauthorized(t *testing.T
 
 	svc := &mockService{
 		ans: &answer.ImpactAnswer{
-			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 		},
 	}
 	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -875,7 +876,7 @@ func TestHandler_Auth_MissingTransport_BodyWorkspaceID_Unauthenticated(t *testin
 
 	svc := &mockService{
 		ans: &answer.ImpactAnswer{
-			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 		},
 	}
 	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -902,7 +903,7 @@ func TestHandler_Auth_HeaderTenantA_BodyTenantB_MismatchRejected(t *testing.T) {
 
 	svc := &mockService{
 		ans: &answer.ImpactAnswer{
-			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 		},
 	}
 	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -930,7 +931,7 @@ func TestHandler_Auth_MatchingHeaderAndBody_Authorized(t *testing.T) {
 
 	svc := &mockService{
 		ans: &answer.ImpactAnswer{
-			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 		},
 	}
 	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -961,7 +962,7 @@ func TestHandler_Auth_UnauthorizedWorkspace_EngineNeverCalled(t *testing.T) {
 
 	svc := &mockService{
 		ans: &answer.ImpactAnswer{
-			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 		},
 	}
 	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -989,7 +990,7 @@ func TestHandler_Auth_EmptyWorkspaceID(t *testing.T) {
 
 	svc := &mockService{
 		ans: &answer.ImpactAnswer{
-			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+			Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 		},
 	}
 	h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -1030,7 +1031,7 @@ func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
 	{
 		svc := &mockService{
 			ans: &answer.ImpactAnswer{
-				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 			},
 		}
 		h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -1052,7 +1053,7 @@ func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
 	{
 		svc := &mockService{
 			ans: &answer.ImpactAnswer{
-				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 			},
 		}
 		h := answer.NewHandler(svc, answer.WithAuthorizer(authorizer, nil))
@@ -1073,7 +1074,7 @@ func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
 	{
 		svc := &mockService{
 			ans: &answer.ImpactAnswer{
-				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 			},
 		}
 		h := answer.NewHandler(svc) // no authorizer
@@ -1094,7 +1095,7 @@ func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
 	{
 		svc := &mockService{
 			ans: &answer.ImpactAnswer{
-				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 			},
 		}
 		h := answer.NewHandler(svc) // no authorizer
@@ -1115,7 +1116,7 @@ func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
 	{
 		svc := &mockService{
 			ans: &answer.ImpactAnswer{
-				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "payments/payments-api"},
+				Target: answer.ResourceIdentity{Provider: "kubernetes", ResourceType: "pod", ProviderID: "cluster-1/payments/payments-api"},
 			},
 		}
 		h := answer.NewHandler(svc) // no authorizer
@@ -1132,3 +1133,123 @@ func TestHandler_Auth_LegitimateAPIRequests(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5 Tests: 422 IDENTITY_INTEGRITY_REJECTED on legacy/ambiguous targets
+// ---------------------------------------------------------------------------
+func TestHandler_RejectLegacyIdentity_422(t *testing.T) {
+	svc := &mockService{}
+	h := answer.NewHandler(svc)
+
+	tests := []struct {
+		name       string
+		payload    string
+		expectCode string
+	}{
+		{
+			name: "legacy namespaced 2-segment target missing cluster",
+			payload: `{
+				"target": {
+					"provider": "kubernetes",
+					"resource_type": "pod",
+					"provider_id": "default/payments-api"
+				},
+				"direction": "incoming",
+				"max_depth": 3
+			}`,
+			expectCode: "IDENTITY_INTEGRITY_REJECTED",
+		},
+		{
+			name: "legacy cluster-scoped 1-segment target missing cluster",
+			payload: `{
+				"target": {
+					"provider": "kubernetes",
+					"resource_type": "node",
+					"provider_id": "worker-1"
+				},
+				"direction": "incoming",
+				"max_depth": 3
+			}`,
+			expectCode: "IDENTITY_INTEGRITY_REJECTED",
+		},
+		{
+			name: "ambiguous 2-segment target on custom resource",
+			payload: `{
+				"target": {
+					"provider": "kubernetes",
+					"resource_type": "virtualservice",
+					"provider_id": "istio-system/vs-main"
+				},
+				"direction": "incoming",
+				"max_depth": 3
+			}`,
+			expectCode: "IDENTITY_INTEGRITY_REJECTED",
+		},
+		{
+			name: "malformed namespaced 1-segment target",
+			payload: `{
+				"target": {
+					"provider": "kubernetes",
+					"resource_type": "pod",
+					"provider_id": "payments-api"
+				},
+				"direction": "incoming",
+				"max_depth": 3
+			}`,
+			expectCode: "IDENTITY_INTEGRITY_REJECTED",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", strings.NewReader(tc.payload))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 Unprocessable Entity, got %d (body: %s)", rr.Code, rr.Body.String())
+			}
+			if svc.calls != 0 {
+				t.Fatalf("service should never be called for legacy target: got %d calls", svc.calls)
+			}
+
+			var errResp answer.ErrorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("failed to decode error response: %v", err)
+			}
+			if errResp.Code != tc.expectCode {
+				t.Errorf("expected code %q, got %q", tc.expectCode, errResp.Code)
+			}
+		})
+	}
+}
+
+func TestHandler_ServiceIdentityIntegrityRejected_422(t *testing.T) {
+	svc := &mockService{
+		err: &answer.IdentityIntegrityError{
+			WorkspaceID: "ws-legacy",
+			Reason:      "workspace contains un-migrated legacy state",
+			Err:         answer.ErrIdentityIntegrityRejected,
+		},
+	}
+	h := answer.NewHandler(svc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/impact", bytes.NewReader(defaultValidPayload()))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 Unprocessable Entity, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+
+	var errResp answer.ErrorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp.Code != "IDENTITY_INTEGRITY_REJECTED" {
+		t.Errorf("expected code IDENTITY_INTEGRITY_REJECTED, got %q", errResp.Code)
+	}
+}

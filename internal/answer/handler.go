@@ -109,6 +109,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Validate request schema and boundaries
 	if err := ValidateImpactRequest(&req); err != nil {
+		var iErr *IdentityIntegrityError
+		if errors.As(err, &iErr) || errors.Is(err, ErrIdentityIntegrityRejected) {
+			writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), CodeIdentityIntegrityRejected)
+			return
+		}
 		writeErrorResponse(w, http.StatusBadRequest, err.Error(), string(CodeValidationError))
 		return
 	}
@@ -117,7 +122,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.service.AnalyzeImpact(r.Context(), req)
 	if err != nil {
 		var vErr *ValidationError
+		var iErr *IdentityIntegrityError
 		switch {
+		case errors.As(err, &iErr) || errors.Is(err, ErrIdentityIntegrityRejected):
+			writeErrorResponse(w, http.StatusUnprocessableEntity, err.Error(), CodeIdentityIntegrityRejected)
 		case errors.As(err, &vErr):
 			writeErrorResponse(w, http.StatusBadRequest, vErr.Error(), string(CodeValidationError))
 		case errors.Is(err, ErrWorkspaceNotMaterialized):
