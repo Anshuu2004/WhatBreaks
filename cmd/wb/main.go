@@ -173,8 +173,19 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer, te
 		defer grpcCancel()
 		if client, err := coreclient.Connect(grpcCtx, *coreAddr); err == nil {
 			coreClient = client
-			answerSvc := answer.NewService(coreClient, logger)
-			apiCfg.ImpactHandler = answer.NewHandler(answerSvc, answer.WithLogger(logger))
+			var answerOpts []answer.Option
+			if pgStore != nil {
+				answerOpts = append(answerOpts,
+					answer.WithWorkspaceIntegrityChecker(pgStore),
+					answer.WithRequireIntegrityChecker(),
+				)
+			}
+			answerSvc := answer.NewService(coreClient, logger, answerOpts...)
+			apiCfg.ImpactHandler = answer.NewHandler(
+				answerSvc,
+				answer.WithLogger(logger),
+				answer.WithAuthorizer(apiCfg.WorkspaceAuthorizer, nil),
+			)
 			logger.Info("Connected to Rust Core Engine", "address", *coreAddr)
 
 			if pgStore != nil {
