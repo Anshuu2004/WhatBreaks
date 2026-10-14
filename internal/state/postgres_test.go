@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1167,5 +1170,620 @@ func TestPostgresStore_RecoveryInvariantsAndAudit(t *testing.T) {
 	})
 	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
 		t.Fatalf("expected ErrWorkspaceRecoveryRequired from ReconcileAuthoritativeBatch when recovery failed, got: %v", err)
+	}
+}
+
+func TestPostgresStore_ReconciliationRecoveryStateSafety(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx := context.Background()
+
+	db, err := database.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("database.New failed: %v", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+
+	ws := "test-recov-safety-pg"
+	_ = pgStore.DeleteWorkspaceState(ctx, ws)
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(context.Background(), ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_recovery_audit WHERE workspace_id = $1", ws)
+	}()
+
+	now := time.Now().UTC()
+	canonicalPod := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "cluster-prod-1/default/api-1",
+		},
+		FirstObservedAt: now,
+		LastObservedAt:  now,
+	}
+
+	// 1. Clean workspace (no recovery record in state_workspace_recovery): reconciliation succeeds
+	_, _ = db.Exec(ctx, "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+	batchRes, err := pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if err != nil {
+		t.Fatalf("expected reconciliation to succeed when no recovery record exists, got: %v", err)
+	}
+	if batchRes == nil || batchRes.ResourcesCreated != 1 {
+		t.Errorf("expected 1 resource created, got %+v", batchRes)
+	}
+
+	// 2. IN_PROGRESS recovery state: reconciliation must fail closed with ErrWorkspaceRecoveryRequired
+	_, err = db.Exec(ctx, `
+		INSERT INTO state_workspace_recovery (workspace_id, operation_id, cluster_id, status, operator_identity, error_message, started_at, updated_at)
+		VALUES ($1, 'rec-inprog-test', 'cluster-prod-1', 'IN_PROGRESS', 'admin@example.com', '', NOW(), NOW())
+		ON CONFLICT (workspace_id) DO UPDATE SET status = 'IN_PROGRESS', error_message = '';
+	`, ws)
+	if err != nil {
+		t.Fatalf("failed to insert IN_PROGRESS recovery record: %v", err)
+	}
+
+	_, err = pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired when recovery status is IN_PROGRESS, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "IN_PROGRESS") {
+		t.Errorf("expected error message to mention IN_PROGRESS, got: %v", err)
+	}
+
+	// 3. FAILED recovery state: reconciliation must fail closed with ErrWorkspaceRecoveryRequired
+	_, err = db.Exec(ctx, `
+		UPDATE state_workspace_recovery
+		SET status = 'FAILED', error_message = 'crashed midway through archival'
+		WHERE workspace_id = $1;
+	`, ws)
+	if err != nil {
+		t.Fatalf("failed to update recovery record to FAILED: %v", err)
+	}
+
+	_, err = pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired when recovery status is FAILED, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "crashed midway through archival") {
+		t.Errorf("expected error message to include stored error, got: %v", err)
+	}
+
+	// 4. COMPLETED recovery state: normal reconciliation succeeds
+	_, err = db.Exec(ctx, `
+		UPDATE state_workspace_recovery
+		SET status = 'COMPLETED', error_message = ''
+		WHERE workspace_id = $1;
+	`, ws)
+	if err != nil {
+		t.Fatalf("failed to update recovery record to COMPLETED: %v", err)
+	}
+
+	batchRes, err = pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if err != nil {
+		t.Fatalf("expected reconciliation to succeed when recovery status is COMPLETED, got: %v", err)
+	}
+	if batchRes == nil {
+		t.Fatalf("expected non-nil batch result on COMPLETED reconciliation")
+	}
+
+	// 5. Database failure (canceled context): fails closed without continuing mutations
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel() // canceled immediately
+	_, err = pgStore.ReconcileAuthoritativeBatch(canceledCtx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if err == nil {
+		t.Fatalf("expected error when context is canceled during reconciliation")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to preserve context.Canceled cause, got: %v", err)
+	}
+
+	// 6. Empty status: fails closed with ErrWorkspaceRecoveryRequired
+	// We drop the CHECK constraint temporarily to simulate legacy/DBA/corrupted data
+	_, _ = db.Exec(ctx, "ALTER TABLE state_workspace_recovery DROP CONSTRAINT IF EXISTS chk_state_workspace_recovery_status")
+	defer func() {
+		_ = state.EnsureSchema(context.Background(), db)
+	}()
+
+	_, err = db.Exec(ctx, `
+		UPDATE state_workspace_recovery
+		SET status = '', error_message = ''
+		WHERE workspace_id = $1;
+	`, ws)
+	if err != nil {
+		t.Fatalf("failed to update recovery record to empty status: %v", err)
+	}
+
+	_, err = pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired for empty status, got: %v", err)
+	}
+
+	// 7. Unknown status: fails closed with ErrWorkspaceRecoveryRequired
+	_, err = db.Exec(ctx, `
+		UPDATE state_workspace_recovery
+		SET status = 'UNKNOWN_STATE_VAL', error_message = ''
+		WHERE workspace_id = $1;
+	`, ws)
+	if err != nil {
+		t.Fatalf("failed to update recovery record to unknown status: %v", err)
+	}
+
+	_, err = pgStore.ReconcileAuthoritativeBatch(ctx, state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired for unknown status, got: %v", err)
+	}
+
+	// 8. Integrity inspection parity for empty and unknown recovery statuses
+	rep, err := pgStore.InspectWorkspaceIntegrity(ctx, ws)
+	if err != nil {
+		t.Fatalf("unexpected error inspecting integrity: %v", err)
+	}
+	if rep.IsClean {
+		t.Errorf("expected IsClean=false when status is unknown, got true")
+	}
+	if !rep.RecoveryRequired {
+		t.Errorf("expected RecoveryRequired=true when status is unknown, got false")
+	}
+
+	// 9. Structural bypass protection: public ReconcileAuthoritativeBatch resets bypass
+	_, _ = db.Exec(ctx, `UPDATE state_workspace_recovery SET status = 'FAILED', error_message = 'failed' WHERE workspace_id = $1`, ws)
+	bParamsWithBypass := state.WithRecoveryBypassForTesting(state.AuthoritativeBatchParams{
+		WorkspaceID: ws,
+		ClusterID:   "cluster-prod-1",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	_, err = pgStore.ReconcileAuthoritativeBatch(ctx, bParamsWithBypass)
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected public ReconcileAuthoritativeBatch to enforce guard even if bypass was set, got: %v", err)
+	}
+}
+
+func TestPostgresStore_RecoveryStatusWriteFailures(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logger := logging.NewJSONLogger(nil, logging.LevelDebug, "pg-status-err-test")
+	db, err := database.New(ctx, cfg, database.WithLogger(logger))
+	if err != nil {
+		t.Skipf("Failed to initialize database pool: %v; skipping", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+	ws := "test-status-write-err-ws"
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(context.Background(), ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_recovery_audit WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DROP TRIGGER IF EXISTS trig_fail_status ON state_workspace_recovery")
+		_, _ = db.Exec(context.Background(), "DROP FUNCTION IF EXISTS fail_recovery_status_write()")
+	}()
+
+	// 1. IN_PROGRESS write failure
+	_, _ = db.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION fail_recovery_status_write() RETURNS TRIGGER AS $$
+		BEGIN
+			IF NEW.status = 'IN_PROGRESS' THEN
+				RAISE EXCEPTION 'simulated IN_PROGRESS write error';
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+		DROP TRIGGER IF EXISTS trig_fail_status ON state_workspace_recovery;
+		CREATE TRIGGER trig_fail_status BEFORE INSERT OR UPDATE ON state_workspace_recovery
+		FOR EACH ROW EXECUTE FUNCTION fail_recovery_status_write();
+	`)
+
+	adminCtx := auth.WithUser(ctx, &auth.User{Role: auth.RoleAdmin, ID: "admin@example.com", Email: "admin@example.com"})
+	recParams := state.LegacyRecoveryParams{
+		WorkspaceID:          ws,
+		ClusterID:            "cluster-prod-1",
+		AuthorizeDestructive: true,
+		OperatorIdentity:     "admin@example.com",
+		Reason:               "testing in_progress failure",
+	}
+
+	res, err := pgStore.RecoverWorkspaceLegacyState(adminCtx, recParams)
+	if err == nil {
+		t.Fatalf("expected error when IN_PROGRESS write fails, got nil")
+	}
+	if res != nil {
+		t.Fatalf("expected nil result when IN_PROGRESS write fails")
+	}
+	if !strings.Contains(err.Error(), "IN_PROGRESS") || !strings.Contains(err.Error(), "simulated IN_PROGRESS write error") {
+		t.Errorf("expected error to mention IN_PROGRESS and preserve underlying cause, got: %v", err)
+	}
+
+	// Verify audit was recorded as FAILED
+	audits, aErr := pgStore.ListRecoveryAudits(ctx, ws)
+	if aErr != nil || len(audits) == 0 {
+		t.Fatalf("expected audit record after IN_PROGRESS write failure, got audits=%v, err=%v", audits, aErr)
+	}
+	if audits[len(audits)-1].Status != "FAILED" || audits[len(audits)-1].FailureCategory != "RECOVERY_EXECUTION" {
+		t.Errorf("unexpected audit: %+v", audits[len(audits)-1])
+	}
+
+	// 2. FAILED write failure
+	_, _ = db.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION fail_recovery_status_write() RETURNS TRIGGER AS $$
+		BEGIN
+			IF NEW.status = 'FAILED' THEN
+				RAISE EXCEPTION 'simulated FAILED write error';
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+	`)
+
+	// Cause main recovery tx to fail by providing a recollection batch that fails validation
+	badParams := state.LegacyRecoveryParams{
+		WorkspaceID:          ws,
+		ClusterID:            "cluster-prod-1",
+		AuthorizeDestructive: true,
+		OperatorIdentity:     "admin@example.com",
+		Reason:               "testing failed write error",
+		AuthoritativeBatch: &state.AuthoritativeBatchParams{
+			WorkspaceID: ws,
+			ClusterID:   "cluster-prod-1",
+			Resources: []state.Resource{
+				{
+					WorkspaceID: ws,
+					Identity: state.ResourceIdentity{
+						Provider:     "kubernetes",
+						ResourceType: "pod",
+						ProviderID:   "bad-identity-not-canonical",
+					},
+					FirstObservedAt: time.Now().UTC(),
+					LastObservedAt:  time.Now().UTC(),
+				},
+			},
+		},
+	}
+
+	_, err = pgStore.RecoverWorkspaceLegacyState(adminCtx, badParams)
+	if err == nil {
+		t.Fatalf("expected error when recovery tx and FAILED write fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated FAILED write error") {
+		t.Errorf("expected error to include FAILED write error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to persist FAILED recovery status") {
+		t.Errorf("expected error to state failed to persist FAILED recovery status, got: %v", err)
+	}
+
+	// 3. COMPLETED write failure
+	_, _ = db.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION fail_recovery_status_write() RETURNS TRIGGER AS $$
+		BEGIN
+			IF NEW.status = 'COMPLETED' THEN
+				RAISE EXCEPTION 'simulated COMPLETED write error';
+			END IF;
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql;
+	`)
+
+	goodParams := state.LegacyRecoveryParams{
+		WorkspaceID:          ws,
+		ClusterID:            "cluster-prod-1",
+		AuthorizeDestructive: true,
+		OperatorIdentity:     "admin@example.com",
+		Reason:               "testing completed write error",
+	}
+
+	res, err = pgStore.RecoverWorkspaceLegacyState(adminCtx, goodParams)
+	if err == nil {
+		t.Fatalf("expected error when COMPLETED write fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "COMPLETED") || !strings.Contains(err.Error(), "simulated COMPLETED write error") {
+		t.Errorf("expected error to mention COMPLETED and preserve underlying cause, got: %v", err)
+	}
+
+	// Verify workspace status in DB is NOT marked COMPLETED (fails closed, remains IN_PROGRESS)
+	var currStatus string
+	_ = db.QueryRow(ctx, "SELECT status FROM state_workspace_recovery WHERE workspace_id = $1", ws).Scan(&currStatus)
+	if currStatus == "COMPLETED" {
+		t.Fatalf("workspace status must NOT be marked COMPLETED when COMPLETED write failed!")
+	}
+}
+
+func TestPostgresStore_RecoveryStartupReconciliationRace(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logger := logging.NewJSONLogger(nil, logging.LevelDebug, "pg-race-test")
+	db, err := database.New(ctx, cfg, database.WithLogger(logger))
+	if err != nil {
+		t.Skipf("Failed to initialize database pool: %v; skipping", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+	ws := "test-startup-race-ws"
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(context.Background(), ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_recovery_audit WHERE workspace_id = $1", ws)
+	}()
+
+	now := time.Now().UTC()
+	canonicalPod := state.Resource{
+		WorkspaceID: ws,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "prod-cluster/default/app-pod",
+		},
+		FirstObservedAt: now,
+		LastObservedAt:  now,
+	}
+
+	// Clean initial state: no recovery row
+	_, _ = db.Exec(ctx, "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+
+	lockAcquired := make(chan struct{})
+	reconcileAttemptStarted := make(chan struct{})
+	reconcileDone := make(chan error, 1)
+
+	go func() {
+		_ = db.WithConnection(ctx, func(cCtx context.Context, conn database.Connection) error {
+			// Recovery Step 2: Acquire session-level advisory lock
+			if _, err := conn.Exec(cCtx, "SELECT pg_advisory_lock(hashtext($1))", ws); err != nil {
+				return err
+			}
+			defer func() {
+				_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", ws)
+			}()
+
+			close(lockAcquired)
+
+			// Wait until reconciliation goroutine has started attempting to reconcile
+			select {
+			case <-reconcileAttemptStarted:
+			case <-time.After(3 * time.Second):
+			}
+
+			// Verify that reconciliation cannot complete while Recovery holds the lock!
+			select {
+			case res := <-reconcileDone:
+				t.Errorf("reconciliation completed while recovery held advisory lock! Scenario A race not prevented: res=%v", res)
+			case <-time.After(300 * time.Millisecond):
+				// Proven: reconciliation is blocked waiting for recovery lock!
+			}
+
+			// Recovery Step 3: Write IN_PROGRESS while lock is held
+			_, err := conn.Exec(cCtx, `
+				INSERT INTO state_workspace_recovery (workspace_id, operation_id, cluster_id, status, operator_identity, error_message, started_at, updated_at)
+				VALUES ($1, 'op-race', 'prod-cluster', 'IN_PROGRESS', 'admin@example.com', '', NOW(), NOW())
+				ON CONFLICT (workspace_id) DO UPDATE SET status = 'IN_PROGRESS';
+			`, ws)
+			if err != nil {
+				return err
+			}
+
+			// Recovery Step 4 & 5: (Simulated recovery work inside lock)
+			time.Sleep(100 * time.Millisecond)
+
+			// Recovery Step 6: Mark COMPLETED before releasing lock
+			_, err = conn.Exec(cCtx, `
+				UPDATE state_workspace_recovery SET status = 'COMPLETED' WHERE workspace_id = $1;
+			`, ws)
+			return err
+		})
+	}()
+
+	// Concurrently attempt reconciliation
+	go func() {
+		<-lockAcquired
+		close(reconcileAttemptStarted)
+		_, err := pgStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+			WorkspaceID: ws,
+			ClusterID:   "prod-cluster",
+			Resources:   []state.Resource{canonicalPod},
+		})
+		reconcileDone <- err
+	}()
+
+	// Wait for reconciliation to unblock after lock release and finish
+	select {
+	case err := <-reconcileDone:
+		if err != nil {
+			t.Fatalf("expected reconciliation to succeed after recovery completed, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for reconciliation to complete after lock release")
+	}
+
+	// Verify the canonical resource was written
+	stateRes, err := pgStore.GetResource(ctx, ws, canonicalPod.Identity)
+	if err != nil || stateRes == nil {
+		t.Fatalf("expected resource to be safely persisted, got err=%v", err)
+	}
+}
+
+func TestPostgresStore_ConcurrentRecoverySerialization(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logger := logging.NewJSONLogger(nil, logging.LevelDebug, "pg-conc-rec-test")
+	db, err := database.New(ctx, cfg, database.WithLogger(logger))
+	if err != nil {
+		t.Skipf("Failed to initialize database pool: %v; skipping", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	pgStore := state.NewPostgresStore(db)
+	ws := "test-conc-rec-serial-ws"
+	defer func() {
+		_ = pgStore.DeleteWorkspaceState(context.Background(), ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_recovery_audit WHERE workspace_id = $1", ws)
+	}()
+
+	const nRoutines = 4
+	var wg sync.WaitGroup
+	errs := make([]error, nRoutines)
+
+	for i := 0; i < nRoutines; i++ {
+		wg.Add(1)
+		idx := i
+		go func() {
+			defer wg.Done()
+			opEmail := fmt.Sprintf("admin-%d@example.com", idx)
+			gCtx := auth.WithUser(ctx, &auth.User{Role: auth.RoleAdmin, ID: opEmail, Email: opEmail})
+			_, errs[idx] = pgStore.RecoverWorkspaceLegacyState(gCtx, state.LegacyRecoveryParams{
+				WorkspaceID:          ws,
+				ClusterID:            "cluster-prod-1",
+				AuthorizeDestructive: true,
+				OperatorIdentity:     opEmail,
+				Reason:               fmt.Sprintf("concurrent recovery run %d", idx),
+			})
+		}()
+	}
+
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("goroutine %d failed: %v", i, e)
+		}
+	}
+
+	var status string
+	err = db.QueryRow(ctx, "SELECT status FROM state_workspace_recovery WHERE workspace_id = $1", ws).Scan(&status)
+	if err != nil || status != "COMPLETED" {
+		t.Fatalf("expected final recovery status COMPLETED, got status=%q, err=%v", status, err)
+	}
+
+	audits, err := pgStore.ListRecoveryAudits(ctx, ws)
+	if err != nil || len(audits) != nRoutines {
+		t.Fatalf("expected %d audit records, got %d (err: %v)", nRoutines, len(audits), err)
+	}
+}
+
+func TestPostgresStore_SchemaConstraintAndMigration(t *testing.T) {
+	cfg := getTestDatabaseConfig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	logger := logging.NewJSONLogger(nil, logging.LevelDebug, "pg-schema-test")
+	db, err := database.New(ctx, cfg, database.WithLogger(logger))
+	if err != nil {
+		t.Skipf("Failed to initialize database pool: %v; skipping", err)
+	}
+	defer db.Close()
+
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed: %v", err)
+	}
+
+	// 1. Verify constraint blocks inserting unsupported status
+	_, err = db.Exec(ctx, `
+		INSERT INTO state_workspace_recovery (workspace_id, operation_id, cluster_id, status, operator_identity, error_message, started_at, updated_at)
+		VALUES ('ws-invalid-test', 'op-inv', 'c1', 'INVALID_STATUS', 'admin@example.com', '', NOW(), NOW())
+		ON CONFLICT (workspace_id) DO NOTHING;
+	`)
+	if err == nil {
+		t.Fatalf("expected database CHECK constraint to reject 'INVALID_STATUS', but INSERT succeeded")
+	}
+
+	// 2. Test existing table migration with invalid rows:
+	// Drop constraint to simulate pre-migration table state
+	_, err = db.Exec(ctx, "ALTER TABLE state_workspace_recovery DROP CONSTRAINT IF EXISTS chk_state_workspace_recovery_status")
+	if err != nil {
+		t.Fatalf("failed to drop constraint for migration test: %v", err)
+	}
+
+	badWS := "ws-mig-invalid-data"
+	_, err = db.Exec(ctx, `
+		INSERT INTO state_workspace_recovery (workspace_id, operation_id, cluster_id, status, operator_identity, error_message, started_at, updated_at)
+		VALUES ($1, 'op-mig', 'c1', 'LEGACY_BOGUS_STATUS', 'admin@example.com', '', NOW(), NOW())
+		ON CONFLICT (workspace_id) DO UPDATE SET status = 'LEGACY_BOGUS_STATUS';
+	`, badWS)
+	if err != nil {
+		t.Fatalf("failed to insert invalid status row: %v", err)
+	}
+	defer func() {
+		_, _ = db.Exec(context.Background(), "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", badWS)
+		_ = state.EnsureSchema(context.Background(), db)
+	}()
+
+	// EnsureSchema MUST FAIL clearly and provide actionable diagnostics
+	migErr := state.EnsureSchema(ctx, db)
+	if migErr == nil {
+		t.Fatalf("expected EnsureSchema to fail when invalid status rows exist, but it succeeded")
+	}
+	if !strings.Contains(migErr.Error(), badWS) || !strings.Contains(migErr.Error(), "LEGACY_BOGUS_STATUS") {
+		t.Errorf("expected migration error to include workspace ID and invalid status, got: %v", migErr)
+	}
+
+	// Verify row was NOT deleted or rewritten
+	var rowStatus string
+	err = db.QueryRow(ctx, "SELECT status FROM state_workspace_recovery WHERE workspace_id = $1", badWS).Scan(&rowStatus)
+	if err != nil || rowStatus != "LEGACY_BOGUS_STATUS" {
+		t.Fatalf("expected row to be preserved as 'LEGACY_BOGUS_STATUS', got status=%q, err=%v", rowStatus, err)
+	}
+
+	// Clean up invalid row
+	_, _ = db.Exec(ctx, "DELETE FROM state_workspace_recovery WHERE workspace_id = $1", badWS)
+
+	// EnsureSchema must now succeed and apply constraint
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("EnsureSchema failed after cleaning up invalid row: %v", err)
+	}
+
+	// Repeated EnsureSchema must be idempotent
+	if err := state.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("repeated EnsureSchema failed: %v", err)
 	}
 }

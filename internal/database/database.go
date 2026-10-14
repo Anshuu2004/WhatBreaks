@@ -205,6 +205,8 @@ func (d *Database) Exec(ctx context.Context, sql string, args ...any) (pgconn.Co
 
 // WithConnection acquires a dedicated connection, executes fn, and releases the connection in defer,
 // faithfully implementing workers/runtime/db.js lines 45-52 withClient.
+// If fn calls Discard on the connection (e.g. after an unconfirmed advisory unlock),
+// the connection is hijacked and closed instead of being returned to the pool.
 func (d *Database) WithConnection(ctx context.Context, fn func(ctx context.Context, conn Connection) error) error {
 	d.mu.RLock()
 	if d.closed || d.pool == nil {
@@ -218,9 +220,16 @@ func (d *Database) WithConnection(ctx context.Context, fn func(ctx context.Conte
 	if err != nil {
 		return RedactError(err)
 	}
-	defer conn.Release()
-
 	wrapper := &connWrapper{rawConn: conn}
+	defer func() {
+		if wrapper.discarded {
+			hijacked := conn.Hijack()
+			_ = hijacked.Close(context.Background())
+			return
+		}
+		conn.Release()
+	}()
+
 	return fn(ctx, wrapper)
 }
 
@@ -333,7 +342,8 @@ func (d *Database) Close() error {
 
 // connWrapper implements Connection wrapping a dedicated *pgxpool.Conn.
 type connWrapper struct {
-	rawConn *pgxpool.Conn
+	rawConn   *pgxpool.Conn
+	discarded bool
 }
 
 func (c *connWrapper) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
@@ -363,14 +373,48 @@ func (c *connWrapper) AdvisoryUnlock(ctx context.Context, key string) (bool, err
 	var released bool
 	err := c.rawConn.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", lockID).Scan(&released)
 	if err != nil {
-		// Matching workers/runtime/db.js: .catch(() => {})
-		return false, nil
+		return false, RedactError(err)
 	}
 	return released, nil
 }
 
+// Discard marks this connection to be destroyed rather than returned to the pool.
+// Safe to call multiple times. Must be used when advisory unlock cannot be confirmed.
+func (c *connWrapper) Discard() {
+	c.discarded = true
+}
+
 func (c *connWrapper) RawConn() *pgxpool.Conn {
 	return c.rawConn
+}
+
+// Begin begins a new transaction on this dedicated connection.
+func (c *connWrapper) Begin(ctx context.Context) (Tx, error) {
+	tx, err := c.rawConn.Begin(ctx)
+	if err != nil {
+		return nil, RedactError(err)
+	}
+	return &txWrapper{rawTx: tx}, nil
+}
+
+// WithTransaction runs fn inside a transaction on this dedicated connection.
+func (c *connWrapper) WithTransaction(ctx context.Context, fn func(ctx context.Context, tx Tx) error) (err error) {
+	tx, err := c.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback(ctx)
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	if err = fn(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // txWrapper implements Tx wrapping a *pgx.Tx.
@@ -422,10 +466,21 @@ func (s *sessionLock) Unlock(ctx context.Context) error {
 		return nil
 	}
 	s.unlocked = true
-	defer s.conn.Release()
 
 	var released bool
-	_ = s.conn.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", s.lockID).Scan(&released)
+	err := s.conn.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", s.lockID).Scan(&released)
+	if err != nil || !released {
+		// Do not return a connection that may still hold a session-level lock.
+		hijacked := s.conn.Hijack()
+		_ = hijacked.Close(context.Background())
+		s.conn = nil
+		if err != nil {
+			return fmt.Errorf("failed to release advisory lock %q: %w", s.key, RedactError(err))
+		}
+		return fmt.Errorf("failed to release advisory lock %q: unlock returned false", s.key)
+	}
+	s.conn.Release()
+	s.conn = nil
 	return nil
 }
 

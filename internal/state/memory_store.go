@@ -721,6 +721,7 @@ func (s *MemoryStore) ReconcileAuthoritativeBatch(ctx context.Context, params Au
 	if ws == "" {
 		return nil, ErrInvalidWorkspace
 	}
+	params.isRecovery = false // public entry point strictly forces guard evaluation
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.reconcileAuthoritativeBatchLocked(params)
@@ -738,9 +739,20 @@ func (s *MemoryStore) reconcileAuthoritativeBatchLocked(params AuthoritativeBatc
 	}
 
 	// Fail closed if workspace is in an incomplete or failed recovery state
-	if st, ok := s.recoveryStatus[ws]; ok {
-		if st.Status == "FAILED" {
-			return nil, fmt.Errorf("%w: workspace %q has a failed recovery that must be resolved before reconciliation: %s", ErrWorkspaceRecoveryRequired, ws, st.ErrorMessage)
+	if !params.isRecovery {
+		if st, ok := s.recoveryStatus[ws]; ok {
+			switch strings.TrimSpace(st.Status) {
+			case "COMPLETED":
+				// Allowed
+			case "FAILED":
+				return nil, fmt.Errorf("%w: workspace %q has a failed recovery (status %q) that must be resolved before reconciliation: %s", ErrWorkspaceRecoveryRequired, ws, st.Status, st.ErrorMessage)
+			case "IN_PROGRESS":
+				return nil, fmt.Errorf("%w: workspace %q recovery is currently in-progress or interrupted (status %q) and must be completed before reconciliation", ErrWorkspaceRecoveryRequired, ws, st.Status)
+			case "":
+				return nil, fmt.Errorf("%w: workspace %q has empty recovery status — manual intervention required", ErrWorkspaceRecoveryRequired, ws)
+			default:
+				return nil, fmt.Errorf("%w: workspace %q has unrecognized recovery status %q — manual intervention required", ErrWorkspaceRecoveryRequired, ws, st.Status)
+			}
 		}
 	}
 
@@ -1152,14 +1164,25 @@ func (s *MemoryStore) InspectWorkspaceIntegrity(ctx context.Context, workspaceID
 
 	// 1. Check durable recovery state machine: fail closed if interrupted or previously failed
 	if st, ok := s.recoveryStatus[ws]; ok {
-		if st.Status == "IN_PROGRESS" {
+		switch strings.TrimSpace(st.Status) {
+		case "COMPLETED":
+			// Clean from recovery perspective
+		case "IN_PROGRESS":
 			rep.IsClean = false
 			rep.RecoveryRequired = true
 			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q recovery is currently in-progress or interrupted", ws))
-		} else if st.Status == "FAILED" {
+		case "FAILED":
 			rep.IsClean = false
 			rep.RecoveryRequired = true
 			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q previous recovery failed: %s", ws, st.ErrorMessage))
+		case "":
+			rep.IsClean = false
+			rep.RecoveryRequired = true
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q has empty recovery status", ws))
+		default:
+			rep.IsClean = false
+			rep.RecoveryRequired = true
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q has unrecognized recovery status %q", ws, st.Status))
 		}
 	}
 
@@ -1525,7 +1548,7 @@ func (s *MemoryStore) RecoverWorkspaceLegacyState(ctx context.Context, params Le
 
 	// 9. If an authoritative batch is provided, reconcile it
 	if params.AuthoritativeBatch != nil {
-		bParams := *params.AuthoritativeBatch
+		bParams := withRecoveryBypass(*params.AuthoritativeBatch)
 		bParams.WorkspaceID = ws
 		bParams.ClusterID = clusterID
 		batchRes, err := s.reconcileAuthoritativeBatchLocked(bParams)
@@ -1598,4 +1621,20 @@ func (s *MemoryStore) ListRecoveryAudits(ctx context.Context, workspaceID string
 	out := make([]RecoveryAuditRecord, len(audits))
 	copy(out, audits)
 	return out, nil
+}
+
+// SetRecoveryStatus sets the recovery status for a workspace (useful for simulating crash/recovery states in tests).
+func (s *MemoryStore) SetRecoveryStatus(workspaceID, status, errorMessage string) {
+	ws := strings.TrimSpace(workspaceID)
+	if ws == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryStatus[ws] = memoryRecoveryStatus{
+		WorkspaceID:  ws,
+		Status:       status,
+		ErrorMessage: errorMessage,
+		UpdatedAt:    time.Now().UTC(),
+	}
 }

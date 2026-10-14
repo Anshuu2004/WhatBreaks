@@ -53,8 +53,14 @@ type Connection interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Begin(ctx context.Context) (Tx, error)
+	WithTransaction(ctx context.Context, fn func(ctx context.Context, tx Tx) error) error
 	TryAdvisoryLock(ctx context.Context, key string) (bool, error)
 	AdvisoryUnlock(ctx context.Context, key string) (bool, error)
+	// Discard marks the connection so it is destroyed instead of returned to the
+	// pool when WithConnection finishes. Use when a session-level advisory lock
+	// may still be held after an unlock failure.
+	Discard()
 	RawConn() *pgxpool.Conn
 }
 

@@ -151,6 +151,27 @@ type AuthoritativeBatchParams struct {
 	Conflicts         []DiscoveryConflict
 	Diagnostics       []DiagnosticItem
 	ScopeSweep        *ScopeSweep
+	// isRecovery is an internal flag that bypasses the FAILED/IN_PROGRESS recovery
+	// guard for internal recollection batches during RecoverWorkspaceLegacyState.
+	// It is unexported to prevent external callers or non-recovery paths from
+	// bypassing the guard. The public ReconcileAuthoritativeBatch entry point
+	// strictly resets this to false. Only RecoverWorkspaceLegacyState may enable it
+	// via withRecoveryBypass after ValidateRecoveryAuthorization succeeds.
+	isRecovery bool
+}
+
+// withRecoveryBypass returns a copy of params with isRecovery set to true.
+// This is package-internal and must only be called from RecoverWorkspaceLegacyState
+// after ValidateRecoveryAuthorization has succeeded.
+func withRecoveryBypass(params AuthoritativeBatchParams) AuthoritativeBatchParams {
+	params.isRecovery = true
+	return params
+}
+
+// WithRecoveryBypassForTesting is exposed exclusively for tests to assert that
+// public reconciliation entry points strictly reset the bypass flag.
+func WithRecoveryBypassForTesting(params AuthoritativeBatchParams) AuthoritativeBatchParams {
+	return withRecoveryBypass(params)
 }
 
 // AuthoritativeBatchResult reports the outcome of the authoritative batch transaction.

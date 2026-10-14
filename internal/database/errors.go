@@ -21,6 +21,19 @@ var (
 	ErrTransactionRolledBack = errors.New("database: transaction rolled back")
 )
 
+// IsDuplicateObject reports whether err is PostgreSQL SQLSTATE 42710 (duplicate_object),
+// e.g. concurrent ADD CONSTRAINT races.
+func IsDuplicateObject(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42710"
+}
+
+// IsCheckViolation reports whether err is PostgreSQL SQLSTATE 23514 (check_violation).
+func IsCheckViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23514"
+}
+
 var dsnPasswordRegex = regexp.MustCompile(`(?i)(postgres(?:ql)?://[^:]+:)([^@]+)(@)`)
 
 // RedactError returns an error with any embedded database credentials or passwords scrubbed.

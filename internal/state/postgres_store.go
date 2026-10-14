@@ -252,8 +252,105 @@ func EnsureSchema(ctx context.Context, db database.DB) error {
 	ALTER TABLE state_recovery_audit ADD COLUMN IF NOT EXISTS failure_category TEXT NOT NULL DEFAULT '';
 	ALTER TABLE state_recovery_audit ADD COLUMN IF NOT EXISTS recollected_resources INT NOT NULL DEFAULT 0;
 	`
-	_, err := db.Exec(ctx, schema)
-	return err
+	if _, err := db.Exec(ctx, schema); err != nil {
+		return err
+	}
+	return ensureWorkspaceRecoveryStatusConstraint(ctx, db)
+}
+
+const workspaceRecoveryStatusConstraint = "chk_state_workspace_recovery_status"
+
+// ensureWorkspaceRecoveryStatusConstraint adds chk_state_workspace_recovery_status
+// in a concurrent-safe way. Invalid existing rows are preserved and reported with
+// actionable diagnostics; they are never rewritten or deleted.
+func ensureWorkspaceRecoveryStatusConstraint(ctx context.Context, db database.DB) error {
+	exists, err := workspaceRecoveryStatusConstraintExists(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to look up %s: %w", workspaceRecoveryStatusConstraint, err)
+	}
+	if !exists {
+		if err := reportInvalidWorkspaceRecoveryStatuses(ctx, db); err != nil {
+			return err
+		}
+		_, err = db.Exec(ctx, `
+			ALTER TABLE state_workspace_recovery
+			ADD CONSTRAINT chk_state_workspace_recovery_status
+			CHECK (status IN ('IN_PROGRESS', 'COMPLETED', 'FAILED'));
+		`)
+		if err != nil {
+			if database.IsDuplicateObject(err) {
+				// Another concurrent EnsureSchema won the race; fall through to verify.
+			} else if database.IsCheckViolation(err) {
+				// Invalid rows appeared between preflight and ADD CONSTRAINT.
+				if diagErr := reportInvalidWorkspaceRecoveryStatuses(ctx, db); diagErr != nil {
+					return diagErr
+				}
+				return fmt.Errorf("failed to add %s: %w", workspaceRecoveryStatusConstraint, err)
+			} else {
+				return fmt.Errorf("failed to add %s: %w", workspaceRecoveryStatusConstraint, err)
+			}
+		}
+	}
+
+	verified, err := workspaceRecoveryStatusConstraintExists(ctx, db)
+	if err != nil {
+		return fmt.Errorf("failed to verify %s: %w", workspaceRecoveryStatusConstraint, err)
+	}
+	if !verified {
+		return fmt.Errorf("expected constraint %s on state_workspace_recovery in current_schema() after EnsureSchema", workspaceRecoveryStatusConstraint)
+	}
+	return nil
+}
+
+func workspaceRecoveryStatusConstraintExists(ctx context.Context, db database.DB) (bool, error) {
+	var exists bool
+	// Scope lookup to the intended schema + table so similarly named constraints
+	// elsewhere cannot mask a missing migration on state_workspace_recovery.
+	err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_constraint c
+			JOIN pg_catalog.pg_class rel ON c.conrelid = rel.oid
+			JOIN pg_catalog.pg_namespace nsp ON rel.relnamespace = nsp.oid
+			WHERE c.conname = $1
+			  AND rel.relname = 'state_workspace_recovery'
+			  AND nsp.nspname = current_schema()
+			  AND c.contype = 'c'
+		)
+	`, workspaceRecoveryStatusConstraint).Scan(&exists)
+	return exists, err
+}
+
+func reportInvalidWorkspaceRecoveryStatuses(ctx context.Context, db database.DB) error {
+	rows, err := db.Query(ctx, `
+		SELECT workspace_id, status
+		FROM state_workspace_recovery
+		WHERE status NOT IN ('IN_PROGRESS', 'COMPLETED', 'FAILED')
+		ORDER BY workspace_id
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect recovery status rows before adding %s: %w", workspaceRecoveryStatusConstraint, err)
+	}
+	defer rows.Close()
+
+	var diagnostics []string
+	for rows.Next() {
+		var wsID, status string
+		if err := rows.Scan(&wsID, &status); err != nil {
+			return fmt.Errorf("failed to scan invalid recovery status row: %w", err)
+		}
+		diagnostics = append(diagnostics, fmt.Sprintf("workspace_id=%q status=%q", wsID, status))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating invalid recovery status rows: %w", err)
+	}
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"cannot add %s: %d invalid state_workspace_recovery row(s) must be corrected manually (rows preserved): %s",
+		workspaceRecoveryStatusConstraint, len(diagnostics), strings.Join(diagnostics, "; "),
+	)
 }
 
 type staleRunError struct {
@@ -750,6 +847,7 @@ func (s *PostgresStore) GetWorkspaceAuthority(ctx context.Context, workspaceID s
 }
 
 func (s *PostgresStore) ReconcileAuthoritativeBatch(ctx context.Context, params AuthoritativeBatchParams) (*AuthoritativeBatchResult, error) {
+	params.isRecovery = false // public entry point strictly forces guard evaluation
 	var result *AuthoritativeBatchResult
 	err := s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
 		var txErr error
@@ -808,11 +906,24 @@ func (s *PostgresStore) reconcileAuthoritativeBatchTx(ctx context.Context, tx da
 	}
 
 	// Fail closed if workspace is in an incomplete or failed recovery state
-	var recStatus, recErr string
-	row := tx.QueryRow(ctx, "SELECT status, error_message FROM state_workspace_recovery WHERE workspace_id = $1", ws)
-	if err := row.Scan(&recStatus, &recErr); err == nil {
-		if recStatus == "FAILED" {
-			return nil, fmt.Errorf("%w: workspace %q has a failed recovery that must be resolved before reconciliation: %s", ErrWorkspaceRecoveryRequired, ws, recErr)
+	if !params.isRecovery {
+		var recStatus, recErrMsg string
+		row := tx.QueryRow(ctx, "SELECT status, error_message FROM state_workspace_recovery WHERE workspace_id = $1", ws)
+		if err := row.Scan(&recStatus, &recErrMsg); err == nil {
+			switch strings.TrimSpace(recStatus) {
+			case "COMPLETED":
+				// Allowed
+			case "FAILED":
+				return nil, fmt.Errorf("%w: workspace %q has a failed recovery (status %q) that must be resolved before reconciliation: %s", ErrWorkspaceRecoveryRequired, ws, recStatus, recErrMsg)
+			case "IN_PROGRESS":
+				return nil, fmt.Errorf("%w: workspace %q recovery is currently in-progress or interrupted (status %q) and must be completed before reconciliation", ErrWorkspaceRecoveryRequired, ws, recStatus)
+			case "":
+				return nil, fmt.Errorf("%w: workspace %q has empty recovery status — manual intervention required", ErrWorkspaceRecoveryRequired, ws)
+			default:
+				return nil, fmt.Errorf("%w: workspace %q has unrecognized recovery status %q — manual intervention required", ErrWorkspaceRecoveryRequired, ws, recStatus)
+			}
+		} else if !strings.Contains(err.Error(), "no rows") {
+			return nil, fmt.Errorf("failed to read workspace recovery status for %s: %w", ws, err)
 		}
 	}
 
@@ -1536,17 +1647,28 @@ func (s *PostgresStore) InspectWorkspaceIntegrity(ctx context.Context, workspace
 	}
 
 	// 1. Durable recovery state machine check
-	var recStatus, recErr string
+	var recStatus, recErrMsg string
 	row := s.db.QueryRow(ctx, "SELECT status, error_message FROM state_workspace_recovery WHERE workspace_id = $1", ws)
-	if err := row.Scan(&recStatus, &recErr); err == nil {
-		if recStatus == "IN_PROGRESS" {
+	if err := row.Scan(&recStatus, &recErrMsg); err == nil {
+		switch strings.TrimSpace(recStatus) {
+		case "COMPLETED":
+			// Clean from recovery perspective
+		case "IN_PROGRESS":
 			rep.IsClean = false
 			rep.RecoveryRequired = true
 			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q recovery is currently in-progress or interrupted", ws))
-		} else if recStatus == "FAILED" {
+		case "FAILED":
 			rep.IsClean = false
 			rep.RecoveryRequired = true
-			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q previous recovery failed: %s", ws, recErr))
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q previous recovery failed: %s", ws, recErrMsg))
+		case "":
+			rep.IsClean = false
+			rep.RecoveryRequired = true
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q has empty recovery status", ws))
+		default:
+			rep.IsClean = false
+			rep.RecoveryRequired = true
+			rep.IntegrityErrors = append(rep.IntegrityErrors, fmt.Sprintf("workspace %q has unrecognized recovery status %q", ws, recStatus))
 		}
 	}
 
@@ -1690,26 +1812,112 @@ func (s *PostgresStore) RecoverWorkspaceLegacyState(ctx context.Context, params 
 		return nil, fmt.Errorf("%w: cluster_id %q cannot contain slashes", ErrMalformedProviderID, clusterID)
 	}
 
-	// Durable state machine: mark IN_PROGRESS immediately (detectable across processes/replicas)
-	_, _ = s.db.Exec(ctx, `
-		INSERT INTO state_workspace_recovery (workspace_id, operation_id, cluster_id, status, operator_identity, error_message, started_at, updated_at)
-		VALUES ($1, $2, $3, 'IN_PROGRESS', $4, '', $5, NOW())
-		ON CONFLICT (workspace_id)
-		DO UPDATE SET operation_id = EXCLUDED.operation_id, cluster_id = EXCLUDED.cluster_id, status = 'IN_PROGRESS',
-		              operator_identity = EXCLUDED.operator_identity, error_message = '', started_at = EXCLUDED.started_at, updated_at = NOW();
-	`, ws, opID, clusterID, opIdentity, startedAt)
-
 	result := &LegacyRecoveryResult{
 		WorkspaceID: ws,
 		ClusterID:   clusterID,
 		CompletedAt: time.Now().UTC(),
 	}
 
-	err := s.db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
-		// 1. Transaction-scoped advisory lock for workspace
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", ws); err != nil {
+	// Hold a session-level advisory lock on a dedicated connection for the full
+	// IN_PROGRESS → work → COMPLETED/FAILED window so reconciliation cannot race
+	// between status writes (same hashtext key space as reconcileAuthoritativeBatchTx).
+	err := s.db.WithConnection(ctx, func(connCtx context.Context, conn database.Connection) error {
+		if _, err := conn.Exec(connCtx, "SELECT pg_advisory_lock(hashtext($1))", ws); err != nil {
 			return fmt.Errorf("failed to acquire recovery lock for workspace %s: %w", ws, err)
 		}
+
+		workErr := s.runWorkspaceLegacyRecoveryLocked(connCtx, conn, ws, clusterID, opID, opIdentity, startedAt, params, result)
+
+		unlockCtx, unlockCancel := context.WithTimeout(context.Background(), recoveryStatusCleanupTimeout)
+		defer unlockCancel()
+		var released bool
+		unlockErr := conn.QueryRow(unlockCtx, "SELECT pg_advisory_unlock(hashtext($1))", ws).Scan(&released)
+		if unlockErr != nil || !released {
+			// Never return a pooled connection that may still hold the session lock.
+			conn.Discard()
+			if unlockErr != nil {
+				if workErr != nil {
+					return fmt.Errorf("%w; additionally failed to release recovery advisory lock: %v", workErr, unlockErr)
+				}
+				return fmt.Errorf("failed to release recovery advisory lock for workspace %s: %w", ws, unlockErr)
+			}
+			if workErr != nil {
+				return fmt.Errorf("%w; additionally failed to release recovery advisory lock: unlock returned false", workErr)
+			}
+			return fmt.Errorf("failed to release recovery advisory lock for workspace %s: unlock returned false", ws)
+		}
+		return workErr
+	})
+
+	result.ArchivedResourcesCount = result.LegacyResourcesArchived
+	result.ArchivedRelationshipsCount = result.LegacyRelationshipsArchived
+	if result.RecollectionResult != nil {
+		result.RecollectedResourcesCount = result.RecollectionResult.ResourcesCreated + result.RecollectionResult.ResourcesUpdated
+	}
+	result.CompletedAt = time.Now().UTC()
+
+	if err != nil {
+		_ = s.recordRecoveryAudit(context.Background(), RecoveryAuditRecord{
+			OperationID:      opID,
+			WorkspaceID:      ws,
+			ClusterID:        clusterID,
+			OperatorIdentity: opIdentity,
+			Reason:           params.Reason,
+			Status:           "FAILED",
+			FailureCategory:  "RECOVERY_EXECUTION",
+			ErrorMessage:     err.Error(),
+			StartedAt:        startedAt,
+			CompletedAt:      time.Now().UTC(),
+		})
+		return nil, err
+	}
+
+	_ = s.recordRecoveryAudit(ctx, RecoveryAuditRecord{
+		OperationID:                 opID,
+		WorkspaceID:                 ws,
+		ClusterID:                   clusterID,
+		OperatorIdentity:            opIdentity,
+		Reason:                      params.Reason,
+		Status:                      "SUCCESS",
+		LegacyResourcesArchived:     result.LegacyResourcesArchived,
+		LegacyRelationshipsArchived: result.LegacyRelationshipsArchived,
+		LegacyProvenanceArchived:    result.LegacyProvenanceArchived,
+		LegacyDiagnosticsArchived:   result.LegacyDiagnosticsArchived,
+		RecollectedResourcesCount:   result.RecollectedResourcesCount,
+		EvidencePreservedCount:      result.EvidencePreservedCount,
+		StartedAt:                   startedAt,
+		CompletedAt:                 time.Now().UTC(),
+	})
+
+	return result, nil
+}
+
+// recoveryStatusCleanupTimeout bounds durable FAILED/COMPLETED status writes and
+// advisory unlock so a canceled caller context cannot skip fail-closed persistence.
+const recoveryStatusCleanupTimeout = 5 * time.Second
+
+func (s *PostgresStore) runWorkspaceLegacyRecoveryLocked(
+	ctx context.Context,
+	conn database.Connection,
+	ws, clusterID, opID, opIdentity string,
+	startedAt time.Time,
+	params LegacyRecoveryParams,
+	result *LegacyRecoveryResult,
+) error {
+	// Durable state machine: mark IN_PROGRESS while the session lock is held.
+	_, err := conn.Exec(ctx, `
+		INSERT INTO state_workspace_recovery (workspace_id, operation_id, cluster_id, status, operator_identity, error_message, started_at, updated_at)
+		VALUES ($1, $2, $3, 'IN_PROGRESS', $4, '', $5, NOW())
+		ON CONFLICT (workspace_id)
+		DO UPDATE SET operation_id = EXCLUDED.operation_id, cluster_id = EXCLUDED.cluster_id, status = 'IN_PROGRESS',
+		              operator_identity = EXCLUDED.operator_identity, error_message = '', started_at = EXCLUDED.started_at, updated_at = NOW();
+	`, ws, opID, clusterID, opIdentity, startedAt)
+	if err != nil {
+		return fmt.Errorf("failed to persist IN_PROGRESS recovery status: %w", err)
+	}
+
+	err = conn.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
+		// Session advisory lock already serializes recovery vs reconciliation.
 
 		// 2. Query and inspect resources
 		resRows, err := tx.Query(ctx, `SELECT provider, resource_type, provider_id, first_observed_at, last_observed_at FROM state_resources WHERE workspace_id = $1`, ws)
@@ -1970,7 +2178,7 @@ func (s *PostgresStore) RecoverWorkspaceLegacyState(ctx context.Context, params 
 
 		// 10. If an authoritative recollection batch is provided, reconcile it inside this atomic transaction
 		if params.AuthoritativeBatch != nil {
-			bParams := *params.AuthoritativeBatch
+			bParams := withRecoveryBypass(*params.AuthoritativeBatch)
 			bParams.WorkspaceID = ws
 			bParams.ClusterID = clusterID
 			batchRes, err := s.reconcileAuthoritativeBatchTx(ctx, tx, bParams)
@@ -1992,60 +2200,40 @@ func (s *PostgresStore) RecoverWorkspaceLegacyState(ctx context.Context, params 
 		return nil
 	})
 
-	result.ArchivedResourcesCount = result.LegacyResourcesArchived
-	result.ArchivedRelationshipsCount = result.LegacyRelationshipsArchived
-	if result.RecollectionResult != nil {
-		result.RecollectedResourcesCount = result.RecollectionResult.ResourcesCreated + result.RecollectionResult.ResourcesUpdated
-	}
-
 	if err != nil {
-		// Durable recovery state machine: mark FAILED state across processes
-		_, _ = s.db.Exec(context.Background(), `
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), recoveryStatusCleanupTimeout)
+		defer cancel()
+		_, persistErr := conn.Exec(cleanupCtx, `
 			UPDATE state_workspace_recovery
 			SET status = 'FAILED', error_message = $2, updated_at = NOW()
 			WHERE workspace_id = $1;
 		`, ws, err.Error())
-
-		_ = s.recordRecoveryAudit(ctx, RecoveryAuditRecord{
-			OperationID:      opID,
-			WorkspaceID:      ws,
-			ClusterID:        clusterID,
-			OperatorIdentity: opIdentity,
-			Reason:           params.Reason,
-			Status:           "FAILED",
-			FailureCategory:  "RECOVERY_EXECUTION",
-			ErrorMessage:     err.Error(),
-			StartedAt:        startedAt,
-			CompletedAt:      time.Now().UTC(),
-		})
-		return nil, err
+		if persistErr != nil {
+			if database.IsConnectionError(persistErr) {
+				return fmt.Errorf("failed to persist FAILED recovery status: durable outcome ambiguous due to connection failure: %w (recovery error: %v)", persistErr, err)
+			}
+			return fmt.Errorf("failed to persist FAILED recovery status: %w (recovery error: %v)", persistErr, err)
+		}
+		return err
 	}
 
-	// Durable recovery state machine: mark COMPLETED
-	_, _ = s.db.Exec(ctx, `
+	// COMPLETED persistence uses a bounded cleanup context (not the caller ctx) so a
+	// canceled caller cannot skip the durable status update. Never report success
+	// unless this write succeeds; connection failures are fail-closed / ambiguous.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), recoveryStatusCleanupTimeout)
+	defer cancel()
+	_, persistErr := conn.Exec(cleanupCtx, `
 		UPDATE state_workspace_recovery
 		SET status = 'COMPLETED', error_message = '', updated_at = NOW()
 		WHERE workspace_id = $1;
 	`, ws)
-
-	_ = s.recordRecoveryAudit(ctx, RecoveryAuditRecord{
-		OperationID:                 opID,
-		WorkspaceID:                 ws,
-		ClusterID:                   clusterID,
-		OperatorIdentity:            opIdentity,
-		Reason:                      params.Reason,
-		Status:                      "SUCCESS",
-		LegacyResourcesArchived:     result.LegacyResourcesArchived,
-		LegacyRelationshipsArchived: result.LegacyRelationshipsArchived,
-		LegacyProvenanceArchived:    result.LegacyProvenanceArchived,
-		LegacyDiagnosticsArchived:   result.LegacyDiagnosticsArchived,
-		RecollectedResourcesCount:   result.RecollectedResourcesCount,
-		EvidencePreservedCount:      result.EvidencePreservedCount,
-		StartedAt:                   startedAt,
-		CompletedAt:                 time.Now().UTC(),
-	})
-
-	return result, nil
+	if persistErr != nil {
+		if database.IsConnectionError(persistErr) {
+			return fmt.Errorf("failed to persist COMPLETED recovery status: durable outcome ambiguous due to connection failure: %w", persistErr)
+		}
+		return fmt.Errorf("failed to persist COMPLETED recovery status: %w", persistErr)
+	}
+	return nil
 }
 
 func (s *PostgresStore) recordRecoveryAudit(ctx context.Context, r RecoveryAuditRecord) error {

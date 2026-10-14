@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -324,5 +325,139 @@ func TestRecoveryInvariants_CRDScopeClassification(t *testing.T) {
 	cls, err = state.ClassifyKubernetesProviderID("unknowncrd.example.com", "cluster/namespace/name")
 	if err != nil || !cls.IsCanonical {
 		t.Errorf("unknown 3-segment should be canonical namespaced, got: %+v, err=%v", cls, err)
+	}
+}
+
+// TestRecoveryInvariants_MemoryStoreRecoveryStateSafety verifies Phase 3 & 4 MemoryStore parity:
+// reconciliation must reject both FAILED and IN_PROGRESS recovery states, and succeed on clean/COMPLETED.
+func TestRecoveryInvariants_MemoryStoreRecoveryStateSafety(t *testing.T) {
+	memStore := state.NewMemoryStore()
+	wsID := "ws-recov-safety-mem"
+	now := time.Now().UTC()
+
+	canonicalPod := state.Resource{
+		WorkspaceID: wsID,
+		Identity: state.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "prod-cluster/default/pod-1",
+		},
+		FirstObservedAt: now,
+		LastObservedAt:  now,
+	}
+
+	// 1. Clean workspace (no recovery record): reconciliation succeeds
+	batchRes, err := memStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if err != nil {
+		t.Fatalf("expected reconciliation to succeed on clean workspace, got: %v", err)
+	}
+	if batchRes == nil || batchRes.ResourcesCreated != 1 {
+		t.Errorf("expected 1 resource created, got %+v", batchRes)
+	}
+
+	// 2. IN_PROGRESS state: reconciliation must fail closed with ErrWorkspaceRecoveryRequired
+	memStore.SetRecoveryStatus(wsID, "IN_PROGRESS", "")
+	_, err = memStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired when recovery status is IN_PROGRESS, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "IN_PROGRESS") {
+		t.Errorf("expected error message to mention IN_PROGRESS, got: %v", err)
+	}
+
+	// 3. FAILED state: reconciliation must fail closed with ErrWorkspaceRecoveryRequired
+	memStore.SetRecoveryStatus(wsID, "FAILED", "archival aborted on error")
+	_, err = memStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired when recovery status is FAILED, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "archival aborted on error") {
+		t.Errorf("expected error message to include stored error, got: %v", err)
+	}
+
+	// 4. COMPLETED state: reconciliation succeeds
+	memStore.SetRecoveryStatus(wsID, "COMPLETED", "")
+	batchRes, err = memStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if err != nil {
+		t.Fatalf("expected reconciliation to succeed when recovery status is COMPLETED, got: %v", err)
+	}
+	if batchRes == nil {
+		t.Fatalf("expected non-nil batch result on COMPLETED reconciliation")
+	}
+
+	// 5. Empty status: fails closed with ErrWorkspaceRecoveryRequired
+	memStore.SetRecoveryStatus(wsID, "", "")
+	_, err = memStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired for empty status, got: %v", err)
+	}
+
+	// 6. Unknown status: fails closed with ErrWorkspaceRecoveryRequired
+	memStore.SetRecoveryStatus(wsID, "UNKNOWN_STATUS_VALUE", "")
+	_, err = memStore.ReconcileAuthoritativeBatch(context.Background(), state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	})
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected ErrWorkspaceRecoveryRequired for unknown status, got: %v", err)
+	}
+
+	// 7. Integrity inspection parity for empty and unknown recovery statuses
+	rep, err := memStore.InspectWorkspaceIntegrity(context.Background(), wsID)
+	if err != nil {
+		t.Fatalf("unexpected error inspecting integrity: %v", err)
+	}
+	if rep.IsClean {
+		t.Errorf("expected IsClean=false when status is unknown, got true")
+	}
+	if !rep.RecoveryRequired {
+		t.Errorf("expected RecoveryRequired=true when status is unknown, got false")
+	}
+
+	memStore.SetRecoveryStatus(wsID, "", "")
+	rep, err = memStore.InspectWorkspaceIntegrity(context.Background(), wsID)
+	if err != nil {
+		t.Fatalf("unexpected error inspecting integrity: %v", err)
+	}
+	if rep.IsClean {
+		t.Errorf("expected IsClean=false when status is empty, got true")
+	}
+	if !rep.RecoveryRequired {
+		t.Errorf("expected RecoveryRequired=true when status is empty, got false")
+	}
+
+	// 8. Public ReconcileAuthoritativeBatch resets isRecovery — ordinary callers cannot bypass guard
+	memStore.SetRecoveryStatus(wsID, "FAILED", "some failure")
+	bParams := state.AuthoritativeBatchParams{
+		WorkspaceID: wsID,
+		ClusterID:   "prod-cluster",
+		Resources:   []state.Resource{canonicalPod},
+	}
+	// Even if internal helper sets bypass, public entry point must enforce guard
+	bParamsWithBypass := state.WithRecoveryBypassForTesting(bParams)
+	_, err = memStore.ReconcileAuthoritativeBatch(context.Background(), bParamsWithBypass)
+	if !errors.Is(err, state.ErrWorkspaceRecoveryRequired) {
+		t.Fatalf("expected public ReconcileAuthoritativeBatch to enforce guard even if bypass was set, got: %v", err)
 	}
 }
