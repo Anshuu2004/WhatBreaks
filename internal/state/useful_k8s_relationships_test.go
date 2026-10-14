@@ -13,12 +13,43 @@ import (
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/state"
 )
 
+const testK8sCluster = "test-cluster"
+
+func qualifyK8s(id, resType string) string {
+	if strings.TrimSpace(id) == "" {
+		return id
+	}
+	parts := strings.Split(id, "/")
+	if !state.IsClusterScoped(resType) {
+		if len(parts) == 1 {
+			return testK8sCluster + "/default/" + id
+		}
+		if len(parts) == 2 {
+			return testK8sCluster + "/" + id
+		}
+	} else {
+		if len(parts) == 1 {
+			return testK8sCluster + "/" + id
+		}
+	}
+	return id
+}
+
 func newReferenceEvidence(id, sourceProvider, sourceResType, sourceProviderID, refType string, target *corev1.ResourceIdentity, extraData map[string]any, observedAt time.Time) *corev1.Evidence {
+	if strings.EqualFold(sourceProvider, "kubernetes") {
+		sourceProviderID = qualifyK8s(sourceProviderID, sourceResType)
+	}
 	dataMap := map[string]any{
 		"reference_type": refType,
 	}
 	if target != nil {
-		dataMap["target"] = target
+		if strings.EqualFold(target.Provider, "kubernetes") {
+			targetCopy := *target
+			targetCopy.ProviderId = qualifyK8s(targetCopy.ProviderId, targetCopy.ResourceType)
+			dataMap["target"] = &targetCopy
+		} else {
+			dataMap["target"] = target
+		}
 	}
 	for k, v := range extraData {
 		dataMap[k] = v
@@ -43,11 +74,20 @@ func newReferenceEvidence(id, sourceProvider, sourceResType, sourceProviderID, r
 }
 
 func newOwnershipEvidence(id, childProvider, childResType, childProviderID string, owner *corev1.ResourceIdentity, isController bool, observedAt time.Time) *corev1.Evidence {
+	if strings.EqualFold(childProvider, "kubernetes") {
+		childProviderID = qualifyK8s(childProviderID, childResType)
+	}
 	dataMap := map[string]any{
 		"controller": isController,
 	}
 	if owner != nil {
-		dataMap["owner"] = owner
+		if strings.EqualFold(owner.Provider, "kubernetes") {
+			ownerCopy := *owner
+			ownerCopy.ProviderId = qualifyK8s(ownerCopy.ProviderId, ownerCopy.ResourceType)
+			dataMap["owner"] = &ownerCopy
+		} else {
+			dataMap["owner"] = owner
+		}
 	}
 	dataBytes, _ := json.Marshal(dataMap)
 
@@ -92,6 +132,7 @@ func TestKubernetesRelationships_PodToConfigMap(t *testing.T) {
 	evValid := newReferenceEvidence("ev-cm-1", "kubernetes", "pod", "prod/web-pod-1", "config_map_ref", targetCM, nil, t0)
 	res1, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evValid},
 	})
 	if err != nil {
@@ -114,7 +155,7 @@ func TestKubernetesRelationships_PodToConfigMap(t *testing.T) {
 	if rel.Category != "Dependency" {
 		t.Errorf("expected category Dependency, got %s", rel.Category)
 	}
-	if rel.Source.ProviderID != "prod/web-pod-1" || rel.Target.ProviderID != "prod/app-config" {
+	if rel.Source.ProviderID != testK8sCluster+"/prod/web-pod-1" || rel.Target.ProviderID != testK8sCluster+"/prod/app-config" {
 		t.Errorf("unexpected endpoints: %s -> %s", rel.Source.ProviderID, rel.Target.ProviderID)
 	}
 
@@ -129,6 +170,7 @@ func TestKubernetesRelationships_PodToConfigMap(t *testing.T) {
 	evRepeat := newReferenceEvidence("ev-cm-2", "kubernetes", "pod", "prod/web-pod-1", "config_map_ref", targetCM, nil, t1)
 	res2, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evRepeat},
 	})
 	if err != nil {
@@ -155,6 +197,7 @@ func TestKubernetesRelationships_PodToConfigMap(t *testing.T) {
 	evMissing := newReferenceEvidence("ev-cm-missing", "kubernetes", "pod", "prod/web-pod-2", "config_map_ref", nil, nil, t0)
 	resMissing, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evMissing},
 	})
 	if err != nil {
@@ -184,12 +227,13 @@ func TestKubernetesRelationships_PodToConfigMap(t *testing.T) {
 		Subject: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "prod/web-pod-3",
+			ProviderId:   testK8sCluster + "/prod/web-pod-3",
 		},
 		Data: dataMalformed,
 	}
 	resMalformed, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evMalformed},
 	})
 	if err != nil {
@@ -225,6 +269,7 @@ func TestKubernetesRelationships_PodToSecret(t *testing.T) {
 	evValid := newReferenceEvidence("ev-sec-1", "kubernetes", "pod", "prod/api-pod", "secret_ref", targetSec, nil, t0)
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evValid},
 	})
 	if err != nil {
@@ -242,7 +287,7 @@ func TestKubernetesRelationships_PodToSecret(t *testing.T) {
 	if rels[0].Kind != "DEPENDS_ON" || rels[0].Category != "Dependency" {
 		t.Errorf("expected DEPENDS_ON (Dependency), got %s (%s)", rels[0].Kind, rels[0].Category)
 	}
-	if rels[0].Target.ProviderID != "prod/db-credentials" {
+	if rels[0].Target.ProviderID != testK8sCluster+"/prod/db-credentials" {
 		t.Errorf("unexpected target provider ID: %s", rels[0].Target.ProviderID)
 	}
 }
@@ -265,6 +310,7 @@ func TestKubernetesRelationships_PodToPVC(t *testing.T) {
 	evValid := newReferenceEvidence("ev-pvc-1", "kubernetes", "pod", "prod/db-pod", "pvc_mount_ref", targetPVC, nil, t0)
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evValid},
 	})
 	if err != nil {
@@ -302,6 +348,7 @@ func TestKubernetesRelationships_PodToServiceAccount(t *testing.T) {
 	evValid := newReferenceEvidence("ev-sa-1", "kubernetes", "pod", "prod/worker-pod", "service_account_ref", targetSA, nil, t0)
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evValid},
 	})
 	if err != nil {
@@ -339,6 +386,7 @@ func TestKubernetesRelationships_IngressToService(t *testing.T) {
 	evValid := newReferenceEvidence("ev-ing-1", "kubernetes", "ingress", "prod/frontend-ing", "ingress_backend_ref", targetSvc, nil, t0)
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evValid},
 	})
 	if err != nil {
@@ -379,6 +427,7 @@ func TestKubernetesRelationships_PodToNode(t *testing.T) {
 	evValid := newReferenceEvidence("ev-node-1", "kubernetes", "pod", "prod/checkout-pod", "pod_scheduled_node", targetNode, nil, t0)
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evValid},
 	})
 	if err != nil {
@@ -425,6 +474,7 @@ func TestKubernetesRelationships_Ownership(t *testing.T) {
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evRS, evPod},
 	})
 	if err != nil {
@@ -447,13 +497,13 @@ func TestKubernetesRelationships_Ownership(t *testing.T) {
 		if r.Kind != "OWNS" || r.Category != "Ownership" {
 			t.Errorf("expected OWNS (Ownership), got %s (%s)", r.Kind, r.Category)
 		}
-		if r.Source.ProviderID == "prod/payments-deploy" && r.Target.ProviderID == "prod/payments-rs-123" {
+		if r.Source.ProviderID == testK8sCluster+"/prod/payments-deploy" && r.Target.ProviderID == testK8sCluster+"/prod/payments-rs-123" {
 			foundDeployOwnsRS = true
 		}
-		if r.Source.ProviderID == "prod/payments-rs-123" && r.Target.ProviderID == "prod/payments-pod-abc" {
+		if r.Source.ProviderID == testK8sCluster+"/prod/payments-rs-123" && r.Target.ProviderID == testK8sCluster+"/prod/payments-pod-abc" {
 			foundRSOwnsPod = true
 		}
-		if r.Source.ProviderID == "prod/payments-deploy" && r.Target.ProviderID == "prod/payments-pod-abc" {
+		if r.Source.ProviderID == testK8sCluster+"/prod/payments-deploy" && r.Target.ProviderID == testK8sCluster+"/prod/payments-pod-abc" {
 			foundDeployOwnsPod = true
 		}
 	}
@@ -493,7 +543,7 @@ func TestNegative_ServiceSelectorNeverCreatesCallsOrDependency(t *testing.T) {
 		Subject: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderId:   "prod/checkout-svc",
+			ProviderId:   testK8sCluster + "/prod/checkout-svc",
 		},
 		Data: svcData,
 	}
@@ -513,13 +563,14 @@ func TestNegative_ServiceSelectorNeverCreatesCallsOrDependency(t *testing.T) {
 		Subject: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "prod/checkout-pod",
+			ProviderId:   testK8sCluster + "/prod/checkout-pod",
 		},
 		Data: podData,
 	}
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evSvc, evPod},
 	})
 	if err != nil {
@@ -556,6 +607,7 @@ func TestNegative_NoRuntimeRelationshipWithoutRuntimeEvidence(t *testing.T) {
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evIng},
 	})
 	if err != nil {
@@ -584,7 +636,7 @@ func newEndpointSliceEvidence(id, serviceName, podName string, isRouting bool, a
 		"target": &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "prod/" + podName,
+			ProviderId:   testK8sCluster + "/prod/" + podName,
 		},
 	}
 	dataBytes, _ := json.Marshal(dataMap)
@@ -599,7 +651,7 @@ func newEndpointSliceEvidence(id, serviceName, podName string, isRouting bool, a
 		Subject: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderId:   "prod/" + serviceName,
+			ProviderId:   testK8sCluster + "/prod/" + serviceName,
 		},
 		Data: dataBytes,
 	}
@@ -618,6 +670,7 @@ func TestKubernetesRelationships_ServiceToPodEndpointSlice(t *testing.T) {
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{ev},
 	})
 	if err != nil {
@@ -640,10 +693,10 @@ func TestKubernetesRelationships_ServiceToPodEndpointSlice(t *testing.T) {
 	if r.Category != "Network" {
 		t.Errorf("expected Category 'Network', got %s", r.Category)
 	}
-	if r.Source.ResourceType != "service" || r.Source.ProviderID != "prod/order-service" {
+	if r.Source.ResourceType != "service" || r.Source.ProviderID != testK8sCluster+"/prod/order-service" {
 		t.Errorf("unexpected source: %v", r.Source)
 	}
-	if r.Target.ResourceType != "pod" || r.Target.ProviderID != "prod/order-backend-pod-1" {
+	if r.Target.ResourceType != "pod" || r.Target.ProviderID != testK8sCluster+"/prod/order-backend-pod-1" {
 		t.Errorf("unexpected target: %v", r.Target)
 	}
 
@@ -669,6 +722,7 @@ func TestKubernetesRelationships_EndpointSlice_MultipleSlicesAndDualStack(t *tes
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evV4, evV6},
 	})
 	if err != nil {
@@ -714,6 +768,7 @@ func TestNegative_EndpointSliceNeverCreatesCalls(t *testing.T) {
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{ev},
 	})
 	if err != nil {
@@ -746,6 +801,7 @@ func TestReconciliation_EndpointSlice_PartialCollectionPreservesExisting(t *test
 	evSlice := newEndpointSliceEvidence("ev-slice-initial", "checkout-svc", "checkout-pod", true, "10.244.0.30", "IPv4", t0)
 	_, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evSlice},
 	})
 	if err != nil {
@@ -764,6 +820,7 @@ func TestReconciliation_EndpointSlice_PartialCollectionPreservesExisting(t *test
 
 	_, err = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   testK8sCluster,
 		Evidence:    []*corev1.Evidence{evCM},
 	})
 	if err != nil {
@@ -774,7 +831,7 @@ func TestReconciliation_EndpointSlice_PartialCollectionPreservesExisting(t *test
 	relsSweep2, _ := store.ListRelationships(ctx, ws)
 	foundRoutesTo := false
 	for _, r := range relsSweep2 {
-		if r.Kind == "ROUTES_TO" && r.Source.ProviderID == "prod/checkout-svc" && r.Target.ProviderID == "prod/checkout-pod" {
+		if r.Kind == "ROUTES_TO" && r.Source.ProviderID == testK8sCluster+"/prod/checkout-svc" && r.Target.ProviderID == testK8sCluster+"/prod/checkout-pod" {
 			foundRoutesTo = true
 			break
 		}

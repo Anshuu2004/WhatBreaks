@@ -58,11 +58,11 @@ func TestT1_DirectlyObservedResource(t *testing.T) {
 
 	ws := "ws-t1-observed"
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
-	ev := makeDiagnosticTestEvidence(uuidStr(101), "kubernetes", "pod", "default/checkout-pod", "CONTROL_PLANE_OBJECT", `{"status":"running"}`, t0)
+	ev := makeDiagnosticTestEvidence(uuidStr(101), "kubernetes", "pod", "cluster-1/default/checkout-pod", "CONTROL_PLANE_OBJECT", `{"status":"running"}`, t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t1-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{ev},
@@ -80,7 +80,7 @@ func TestT1_DirectlyObservedResource(t *testing.T) {
 	storedRes, err := store.GetResource(ctx, ws, state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "default/checkout-pod",
+		ProviderID:   "cluster-1/default/checkout-pod",
 	})
 	if err != nil {
 		t.Fatalf("GetResource failed: %v", err)
@@ -99,7 +99,7 @@ func TestT1_DirectlyObservedResource(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/checkout-pod",
+			ProviderID:   "cluster-1/default/checkout-pod",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -135,7 +135,7 @@ func TestT2_UnobservedRelationshipEndpoint(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Pod evidence that references an external unobserved RDS database
-	podEv := makeDiagnosticTestEvidence(uuidStr(201), "kubernetes", "pod", "default/api-pod", "CONTROL_PLANE_OBJECT", `{"status":"running"}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(201), "kubernetes", "pod", "cluster-1/default/api-pod", "CONTROL_PLANE_OBJECT", `{"status":"running"}`, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -143,11 +143,11 @@ func TestT2_UnobservedRelationshipEndpoint(t *testing.T) {
 			"provider_id":   "prod-db",
 		},
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(202), "kubernetes", "pod", "default/api-pod", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(202), "kubernetes", "pod", "cluster-1/default/api-pod", "RESOURCE_REFERENCE", string(depData), t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t2-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -162,7 +162,7 @@ func TestT2_UnobservedRelationshipEndpoint(t *testing.T) {
 	_, err = store.GetResource(ctx, ws, state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "default/api-pod",
+		ProviderID:   "cluster-1/default/api-pod",
 	})
 	if err != nil {
 		t.Fatalf("expected api-pod in store: %v", err)
@@ -206,7 +206,7 @@ func TestT3_UnresolvedReferenceDiagnostic(t *testing.T) {
 	ws := "ws-t3-diag"
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
-	podEv := makeDiagnosticTestEvidence(uuidStr(301), "kubernetes", "pod", "default/client-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(301), "kubernetes", "pod", "cluster-1/default/client-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -214,11 +214,11 @@ func TestT3_UnresolvedReferenceDiagnostic(t *testing.T) {
 			"provider_id":   "analytics-db",
 		},
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(302), "kubernetes", "pod", "default/client-pod", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(302), "kubernetes", "pod", "cluster-1/default/client-pod", "RESOURCE_REFERENCE", string(depData), t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t3-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -241,7 +241,7 @@ func TestT3_UnresolvedReferenceDiagnostic(t *testing.T) {
 	for _, d := range diags {
 		if d.Code == "UNRESOLVED_REFERENCE" && d.ReferencedResource != nil && d.ReferencedResource.ProviderID == "analytics-db" {
 			found = true
-			if d.Subject == nil || d.Subject.ProviderID != "default/client-pod" {
+			if d.Subject == nil || d.Subject.ProviderID != "cluster-1/default/client-pod" {
 				t.Errorf("expected subject default/client-pod, got %v", d.Subject)
 			}
 			if len(d.EvidenceIDs) == 0 || d.EvidenceIDs[0] != uuidStr(302) {
@@ -277,19 +277,19 @@ func TestT4_LaterResolution(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Run 1: Pod references unobserved service
-	podEv := makeDiagnosticTestEvidence(uuidStr(401), "kubernetes", "pod", "default/fe", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(401), "kubernetes", "pod", "cluster-1/default/fe", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "service",
-			"provider_id":   "default/be-svc",
+			"provider_id":   "cluster-1/default/be-svc",
 		},
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(402), "kubernetes", "pod", "default/fe", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(402), "kubernetes", "pod", "cluster-1/default/fe", "RESOURCE_REFERENCE", string(depData), t0)
 
 	batch1 := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t4-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -305,11 +305,11 @@ func TestT4_LaterResolution(t *testing.T) {
 
 	// Run 2: Directly observe default/be-svc in successful sweep
 	t1 := t0.Add(5 * time.Minute)
-	svcEv := makeDiagnosticTestEvidence(uuidStr(403), "kubernetes", "service", "default/be-svc", "CONTROL_PLANE_OBJECT", `{}`, t1)
+	svcEv := makeDiagnosticTestEvidence(uuidStr(403), "kubernetes", "service", "cluster-1/default/be-svc", "CONTROL_PLANE_OBJECT", `{}`, t1)
 
 	batch2 := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t4-2",
 		Generation:  2,
 		Evidence:    []*corev1.Evidence{svcEv},
@@ -336,7 +336,7 @@ func TestT4_LaterResolution(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/fe",
+			ProviderID:   "cluster-1/default/fe",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -366,19 +366,19 @@ func TestT5_FailedScope_DoesNotResolve(t *testing.T) {
 	ws := "ws-t5-failed-scope"
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
-	podEv := makeDiagnosticTestEvidence(uuidStr(501), "kubernetes", "pod", "default/fe", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(501), "kubernetes", "pod", "cluster-1/default/fe", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "service",
-			"provider_id":   "default/be-svc",
+			"provider_id":   "cluster-1/default/be-svc",
 		},
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(502), "kubernetes", "pod", "default/fe", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(502), "kubernetes", "pod", "cluster-1/default/fe", "RESOURCE_REFERENCE", string(depData), t0)
 
 	batch1 := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t5-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -388,7 +388,7 @@ func TestT5_FailedScope_DoesNotResolve(t *testing.T) {
 	// Run 2: Sweep occurred but the services scope FAILED
 	batch2 := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t5-2",
 		Generation:  2,
 		ScopeSweep: &state.ScopeSweep{
@@ -399,7 +399,7 @@ func TestT5_FailedScope_DoesNotResolve(t *testing.T) {
 
 	diags, _ := store.ListDiagnostics(ctx, ws)
 	for _, d := range diags {
-		if d.Code == "UNRESOLVED_REFERENCE" && d.ReferencedResource != nil && d.ReferencedResource.ProviderID == "default/be-svc" {
+		if d.Code == "UNRESOLVED_REFERENCE" && d.ReferencedResource != nil && d.ReferencedResource.ProviderID == "cluster-1/default/be-svc" {
 			if d.Resolved {
 				t.Fatalf("FAILED scope must NOT resolve diagnostic!")
 			}
@@ -420,10 +420,10 @@ func TestT6_RequiredScopeFailure(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Initial clean state
-	ev := makeDiagnosticTestEvidence(uuidStr(601), "kubernetes", "pod", "default/worker", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	ev := makeDiagnosticTestEvidence(uuidStr(601), "kubernetes", "pod", "cluster-1/default/worker", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batch1 := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t6-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{ev},
@@ -440,7 +440,7 @@ func TestT6_RequiredScopeFailure(t *testing.T) {
 	// Attempt reconcile with required scope failure
 	batch2 := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t6-2",
 		Generation:  2,
 		ScopeSweep: &state.ScopeSweep{
@@ -456,7 +456,7 @@ func TestT6_RequiredScopeFailure(t *testing.T) {
 
 	// Authoritative state must remain completely unchanged
 	resAfter, _ := store.ListResources(ctx, ws)
-	if len(resAfter) != 1 || resAfter[0].Identity.ProviderID != "default/worker" {
+	if len(resAfter) != 1 || resAfter[0].Identity.ProviderID != "cluster-1/default/worker" {
 		t.Errorf("authoritative state changed despite required scope failure!")
 	}
 }
@@ -478,11 +478,11 @@ func TestT7_OptionalScopeFailure(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Clean pod observed
-	podEv := makeDiagnosticTestEvidence(uuidStr(701), "kubernetes", "pod", "default/web", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(701), "kubernetes", "pod", "cluster-1/default/web", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	// Optional scope 'ingress' failed
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t7-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv},
@@ -519,7 +519,7 @@ func TestT7_OptionalScopeFailure(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/web",
+			ProviderID:   "cluster-1/default/web",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -551,17 +551,17 @@ func TestT8_UnmappedRuntimeConnection(t *testing.T) {
 	ws := "ws-t8-unmapped"
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
-	callerPod := makeDiagnosticTestEvidence(uuidStr(801), "kubernetes", "pod", "default/caller", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	callerPod := makeDiagnosticTestEvidence(uuidStr(801), "kubernetes", "pod", "cluster-1/default/caller", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	connData, _ := json.Marshal(map[string]interface{}{
 		"destination": "198.51.100.25:443",
 		"port":        443,
 		"protocol":    "tcp",
 	})
-	connEv := makeDiagnosticTestEvidence(uuidStr(802), "kubernetes", "pod", "default/caller", "RUNTIME_CONNECTION", string(connData), t0)
+	connEv := makeDiagnosticTestEvidence(uuidStr(802), "kubernetes", "pod", "cluster-1/default/caller", "RUNTIME_CONNECTION", string(connData), t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t8-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{callerPod, connEv},
@@ -578,7 +578,7 @@ func TestT8_UnmappedRuntimeConnection(t *testing.T) {
 	for _, d := range diags {
 		if d.Code == "UNMAPPED_CONNECTION" {
 			found = true
-			if d.Subject == nil || d.Subject.ProviderID != "default/caller" {
+			if d.Subject == nil || d.Subject.ProviderID != "cluster-1/default/caller" {
 				t.Errorf("expected caller subject default/caller, got %v", d.Subject)
 			}
 			if !strings.Contains(d.UnresolvedEndpoint, "198.51.100.25") {
@@ -620,10 +620,10 @@ func TestT9_UnobservedAnalysisTarget(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Observe one valid resource in the workspace
-	podEv := makeDiagnosticTestEvidence(uuidStr(901), "kubernetes", "pod", "default/other-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(901), "kubernetes", "pod", "cluster-1/default/other-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t9-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv},
@@ -637,7 +637,7 @@ func TestT9_UnobservedAnalysisTarget(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/ghost-target",
+			ProviderID:   "cluster-1/default/ghost-target",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -685,10 +685,10 @@ func TestT10_ZeroImpactCompleteness(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Standalone pod observed with no dependencies
-	podEv := makeDiagnosticTestEvidence(uuidStr(1001), "kubernetes", "pod", "default/leaf-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(1001), "kubernetes", "pod", "cluster-1/default/leaf-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t10-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv},
@@ -702,7 +702,7 @@ func TestT10_ZeroImpactCompleteness(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/leaf-pod",
+			ProviderID:   "cluster-1/default/leaf-pod",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -726,7 +726,7 @@ func TestT10_ZeroImpactCompleteness(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/absent-pod",
+			ProviderID:   "cluster-1/default/absent-pod",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -759,19 +759,19 @@ func TestT11_UnrelatedWorkspaceDiagnostic(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Resource cluster A: clean pod-a and svc-a
-	podA := makeDiagnosticTestEvidence(uuidStr(1101), "kubernetes", "pod", "default/pod-a", "CONTROL_PLANE_OBJECT", `{}`, t0)
-	svcA := makeDiagnosticTestEvidence(uuidStr(1102), "kubernetes", "service", "default/svc-a", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podA := makeDiagnosticTestEvidence(uuidStr(1101), "kubernetes", "pod", "cluster-1/default/pod-a", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	svcA := makeDiagnosticTestEvidence(uuidStr(1102), "kubernetes", "service", "cluster-1/default/svc-a", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depA, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "service",
-			"provider_id":   "default/svc-a",
+			"provider_id":   "cluster-1/default/svc-a",
 		},
 	})
-	relA := makeDiagnosticTestEvidence(uuidStr(1103), "kubernetes", "pod", "default/pod-a", "RESOURCE_REFERENCE", string(depA), t0)
+	relA := makeDiagnosticTestEvidence(uuidStr(1103), "kubernetes", "pod", "cluster-1/default/pod-a", "RESOURCE_REFERENCE", string(depA), t0)
 
 	// Resource cluster B (unrelated): pod-z references unobserved db-z
-	podZ := makeDiagnosticTestEvidence(uuidStr(1104), "kubernetes", "pod", "default/pod-z", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podZ := makeDiagnosticTestEvidence(uuidStr(1104), "kubernetes", "pod", "cluster-1/default/pod-z", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depZ, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -779,11 +779,11 @@ func TestT11_UnrelatedWorkspaceDiagnostic(t *testing.T) {
 			"provider_id":   "db-z",
 		},
 	})
-	relZ := makeDiagnosticTestEvidence(uuidStr(1105), "kubernetes", "pod", "default/pod-z", "RESOURCE_REFERENCE", string(depZ), t0)
+	relZ := makeDiagnosticTestEvidence(uuidStr(1105), "kubernetes", "pod", "cluster-1/default/pod-z", "RESOURCE_REFERENCE", string(depZ), t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t11-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podA, svcA, relA, podZ, relZ},
@@ -797,7 +797,7 @@ func TestT11_UnrelatedWorkspaceDiagnostic(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "default/svc-a",
+			ProviderID:   "cluster-1/default/svc-a",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -814,7 +814,7 @@ func TestT11_UnrelatedWorkspaceDiagnostic(t *testing.T) {
 		t.Errorf("expected COMPLETE for svc-a, got %v", ans.Completeness)
 	}
 	for _, d := range ans.Diagnostics {
-		if d.Subject != nil && d.Subject.ProviderID == "default/pod-z" {
+		if d.Subject != nil && d.Subject.ProviderID == "cluster-1/default/pod-z" {
 			t.Errorf("unrelated diagnostic leaked into svc-a query!")
 		}
 	}
@@ -837,16 +837,16 @@ func TestT12_RelevantBlastRadiusDiagnostic(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// svc-target is depended on by pod-client
-	svcA := makeDiagnosticTestEvidence(uuidStr(1201), "kubernetes", "service", "default/core-svc", "CONTROL_PLANE_OBJECT", `{}`, t0)
-	podB := makeDiagnosticTestEvidence(uuidStr(1202), "kubernetes", "pod", "default/client-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	svcA := makeDiagnosticTestEvidence(uuidStr(1201), "kubernetes", "service", "cluster-1/default/core-svc", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podB := makeDiagnosticTestEvidence(uuidStr(1202), "kubernetes", "pod", "cluster-1/default/client-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depSvc, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "service",
-			"provider_id":   "default/core-svc",
+			"provider_id":   "cluster-1/default/core-svc",
 		},
 	})
-	relSvc := makeDiagnosticTestEvidence(uuidStr(1203), "kubernetes", "pod", "default/client-pod", "RESOURCE_REFERENCE", string(depSvc), t0)
+	relSvc := makeDiagnosticTestEvidence(uuidStr(1203), "kubernetes", "pod", "cluster-1/default/client-pod", "RESOURCE_REFERENCE", string(depSvc), t0)
 
 	// But pod-client ALSO references an unobserved external redis
 	depRedis, _ := json.Marshal(map[string]interface{}{
@@ -856,11 +856,11 @@ func TestT12_RelevantBlastRadiusDiagnostic(t *testing.T) {
 			"provider_id":   "unobserved-redis",
 		},
 	})
-	relRedis := makeDiagnosticTestEvidence(uuidStr(1204), "kubernetes", "pod", "default/client-pod", "RESOURCE_REFERENCE", string(depRedis), t0)
+	relRedis := makeDiagnosticTestEvidence(uuidStr(1204), "kubernetes", "pod", "cluster-1/default/client-pod", "RESOURCE_REFERENCE", string(depRedis), t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t12-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{svcA, podB, relSvc, relRedis},
@@ -874,7 +874,7 @@ func TestT12_RelevantBlastRadiusDiagnostic(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "default/core-svc",
+			ProviderID:   "cluster-1/default/core-svc",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -916,10 +916,10 @@ func TestT13_DiscoveryConflict(t *testing.T) {
 	ws := "ws-t13-conflict"
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
-	podEv := makeDiagnosticTestEvidence(uuidStr(1301), "kubernetes", "pod", "default/ambiguous-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(1301), "kubernetes", "pod", "cluster-1/default/ambiguous-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t13-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv},
@@ -975,10 +975,10 @@ func TestT14_StaleCollectionRun(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Gen 5 accepted
-	ev1 := makeDiagnosticTestEvidence(uuidStr(1401), "kubernetes", "pod", "default/p5", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	ev1 := makeDiagnosticTestEvidence(uuidStr(1401), "kubernetes", "pod", "cluster-1/default/p5", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batchGen5 := state.ObservationBatch{
 		WorkspaceID:       ws,
-		ClusterID:         "default",
+		ClusterID:         "cluster-1",
 		RunID:             "run-t14-gen5",
 		SamplingStartedAt: t0,
 		Generation:        5,
@@ -991,10 +991,10 @@ func TestT14_StaleCollectionRun(t *testing.T) {
 
 	// Gen 3 arrives late (stale run with earlier sampling timestamp)
 	tStale := t0.Add(-5 * time.Minute)
-	ev2 := makeDiagnosticTestEvidence(uuidStr(1402), "kubernetes", "pod", "default/p3-stale", "CONTROL_PLANE_OBJECT", `{}`, tStale)
+	ev2 := makeDiagnosticTestEvidence(uuidStr(1402), "kubernetes", "pod", "cluster-1/default/p3-stale", "CONTROL_PLANE_OBJECT", `{}`, tStale)
 	batchGen3 := state.ObservationBatch{
 		WorkspaceID:       ws,
-		ClusterID:         "default",
+		ClusterID:         "cluster-1",
 		RunID:             "run-t14-gen3",
 		SamplingStartedAt: tStale,
 		Generation:        3,
@@ -1009,7 +1009,7 @@ func TestT14_StaleCollectionRun(t *testing.T) {
 	_, err = store.GetResource(ctx, ws, state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "default/p3-stale",
+		ProviderID:   "cluster-1/default/p3-stale",
 	})
 	if err == nil {
 		t.Errorf("stale run mutated authoritative state!")
@@ -1048,7 +1048,7 @@ func TestT15_FailedReconciliationTransaction(t *testing.T) {
 	err = db.WithTransaction(ctx, func(ctx context.Context, tx database.Tx) error {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO state_resources (workspace_id, provider, resource_type, provider_id, first_observed_at, last_observed_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-			ws, "kubernetes", "pod", "default/rollback-pod", t0, t0)
+			ws, "kubernetes", "pod", "cluster-1/default/rollback-pod", t0, t0)
 		if err != nil {
 			return err
 		}
@@ -1064,7 +1064,7 @@ func TestT15_FailedReconciliationTransaction(t *testing.T) {
 	_, err = pgStore.GetResource(ctx, ws, state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "default/rollback-pod",
+		ProviderID:   "cluster-1/default/rollback-pod",
 	})
 	if err == nil {
 		t.Errorf("partial resource mutation persisted despite transaction failure!")
@@ -1089,7 +1089,7 @@ func TestT16_WorkspaceIsolation(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Tenant A has an unresolved reference diagnostic
-	podA := makeDiagnosticTestEvidence(uuidStr(1601), "kubernetes", "pod", "default/pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podA := makeDiagnosticTestEvidence(uuidStr(1601), "kubernetes", "pod", "cluster-1/default/pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depA, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -1097,21 +1097,21 @@ func TestT16_WorkspaceIsolation(t *testing.T) {
 			"provider_id":   "missing-db",
 		},
 	})
-	relA := makeDiagnosticTestEvidence(uuidStr(1602), "kubernetes", "pod", "default/pod", "RESOURCE_REFERENCE", string(depA), t0)
+	relA := makeDiagnosticTestEvidence(uuidStr(1602), "kubernetes", "pod", "cluster-1/default/pod", "RESOURCE_REFERENCE", string(depA), t0)
 
 	_, _ = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws1,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t16-a",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podA, relA},
 	})
 
 	// Tenant B has clean observation
-	podB := makeDiagnosticTestEvidence(uuidStr(1603), "kubernetes", "pod", "default/pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podB := makeDiagnosticTestEvidence(uuidStr(1603), "kubernetes", "pod", "cluster-1/default/pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	_, _ = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws2,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t16-b",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podB},
@@ -1126,7 +1126,7 @@ func TestT16_WorkspaceIsolation(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/pod",
+			ProviderID:   "cluster-1/default/pod",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -1158,7 +1158,7 @@ func TestT17_EvidenceImmutability(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 	rawData := `{"spec":{"target":"unobserved-db"}}`
 
-	podEv := makeDiagnosticTestEvidence(uuidStr(1701), "kubernetes", "pod", "default/client", "RESOURCE_REFERENCE", rawData, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(1701), "kubernetes", "pod", "cluster-1/default/client", "RESOURCE_REFERENCE", rawData, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -1166,11 +1166,11 @@ func TestT17_EvidenceImmutability(t *testing.T) {
 			"provider_id":   "unobserved-db",
 		},
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(1702), "kubernetes", "pod", "default/client", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(1702), "kubernetes", "pod", "cluster-1/default/client", "RESOURCE_REFERENCE", string(depData), t0)
 
 	_, _ = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t17-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -1181,7 +1181,7 @@ func TestT17_EvidenceImmutability(t *testing.T) {
 	dbEv := makeDiagnosticTestEvidence(uuidStr(1703), "aws", "rds_instance", "unobserved-db", "CONTROL_PLANE_OBJECT", `{}`, t1)
 	_, _ = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t17-2",
 		Generation:  2,
 		Evidence:    []*corev1.Evidence{dbEv},
@@ -1227,7 +1227,7 @@ func TestT18_DeterministicOutput(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Create multiple diagnostics with multiple evidence IDs
-	callerPod := makeDiagnosticTestEvidence(uuidStr(1801), "kubernetes", "pod", "default/fe", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	callerPod := makeDiagnosticTestEvidence(uuidStr(1801), "kubernetes", "pod", "cluster-1/default/fe", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depData1, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -1242,12 +1242,12 @@ func TestT18_DeterministicOutput(t *testing.T) {
 			"provider_id":   "missing-db-2",
 		},
 	})
-	rel1 := makeDiagnosticTestEvidence(uuidStr(1802), "kubernetes", "pod", "default/fe", "RESOURCE_REFERENCE", string(depData1), t0)
-	rel2 := makeDiagnosticTestEvidence(uuidStr(1803), "kubernetes", "pod", "default/fe", "RESOURCE_REFERENCE", string(depData2), t0)
+	rel1 := makeDiagnosticTestEvidence(uuidStr(1802), "kubernetes", "pod", "cluster-1/default/fe", "RESOURCE_REFERENCE", string(depData1), t0)
+	rel2 := makeDiagnosticTestEvidence(uuidStr(1803), "kubernetes", "pod", "cluster-1/default/fe", "RESOURCE_REFERENCE", string(depData2), t0)
 
 	_, _ = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t18-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{callerPod, rel1, rel2},
@@ -1259,7 +1259,7 @@ func TestT18_DeterministicOutput(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderID:   "default/fe",
+			ProviderID:   "cluster-1/default/fe",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -1305,21 +1305,21 @@ func TestT19_ExistingPropagationBoundaries(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Deployment -> OWNS -> ReplicaSet
-	depEv := makeDiagnosticTestEvidence(uuidStr(1901), "kubernetes", "deployment", "default/fe-dep", "CONTROL_PLANE_OBJECT", `{}`, t0)
-	rsEv := makeDiagnosticTestEvidence(uuidStr(1902), "kubernetes", "replicaset", "default/fe-rs", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	depEv := makeDiagnosticTestEvidence(uuidStr(1901), "kubernetes", "deployment", "cluster-1/default/fe-dep", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	rsEv := makeDiagnosticTestEvidence(uuidStr(1902), "kubernetes", "replicaset", "cluster-1/default/fe-rs", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	ownsData, _ := json.Marshal(map[string]interface{}{
 		"owner": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "deployment",
-			"provider_id":   "default/fe-dep",
+			"provider_id":   "cluster-1/default/fe-dep",
 		},
 		"controller": true,
 	})
-	relOwns := makeDiagnosticTestEvidence(uuidStr(1903), "kubernetes", "replicaset", "default/fe-rs", "OWNERSHIP_REFERENCE", string(ownsData), t0)
+	relOwns := makeDiagnosticTestEvidence(uuidStr(1903), "kubernetes", "replicaset", "cluster-1/default/fe-rs", "OWNERSHIP_REFERENCE", string(ownsData), t0)
 
 	_, _ = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t19-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{depEv, rsEv, relOwns},
@@ -1332,7 +1332,7 @@ func TestT19_ExistingPropagationBoundaries(t *testing.T) {
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "deployment",
-			ProviderID:   "default/fe-dep",
+			ProviderID:   "cluster-1/default/fe-dep",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -1365,20 +1365,20 @@ func TestT20_SecretSafety(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	secretPayload := "SUPER_SECRET_PRIVATE_KEY_PLAINTEXT_12345"
-	podEv := makeDiagnosticTestEvidence(uuidStr(2001), "kubernetes", "pod", "default/secure-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(2001), "kubernetes", "pod", "cluster-1/default/secure-pod", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "secret",
-			"provider_id":   "default/tls-secret",
+			"provider_id":   "cluster-1/default/tls-secret",
 		},
 		"secret_payload": secretPayload,
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(2002), "kubernetes", "pod", "default/secure-pod", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(2002), "kubernetes", "pod", "cluster-1/default/secure-pod", "RESOURCE_REFERENCE", string(depData), t0)
 
 	_, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-t20-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -1422,10 +1422,10 @@ func TestScopeCompleteness_EndpointSliceFailure_AvoidsFalseConfidence(t *testing
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Service is observed, but EndpointSlice collection failed
-	svcEv := makeDiagnosticTestEvidence(uuidStr(2101), "kubernetes", "service", "default/order-service", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	svcEv := makeDiagnosticTestEvidence(uuidStr(2101), "kubernetes", "service", "cluster-1/default/order-service", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-scope-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{svcEv},
@@ -1447,7 +1447,7 @@ func TestScopeCompleteness_EndpointSliceFailure_AvoidsFalseConfidence(t *testing
 		Target: &answer.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "service",
-			ProviderID:   "default/order-service",
+			ProviderID:   "cluster-1/default/order-service",
 		},
 		Direction: "incoming",
 		MaxDepth:  3,
@@ -1498,7 +1498,7 @@ func TestHTTP_EndToEnd_DiagnosticsAndCompleteness(t *testing.T) {
 	t0 := time.Date(2026, 10, 10, 10, 0, 0, 0, time.UTC)
 
 	// Pod references unobserved cache
-	podEv := makeDiagnosticTestEvidence(uuidStr(2201), "kubernetes", "pod", "default/web", "CONTROL_PLANE_OBJECT", `{}`, t0)
+	podEv := makeDiagnosticTestEvidence(uuidStr(2201), "kubernetes", "pod", "cluster-1/default/web", "CONTROL_PLANE_OBJECT", `{}`, t0)
 	depData, _ := json.Marshal(map[string]interface{}{
 		"target": map[string]interface{}{
 			"provider":      "aws",
@@ -1506,11 +1506,11 @@ func TestHTTP_EndToEnd_DiagnosticsAndCompleteness(t *testing.T) {
 			"provider_id":   "unobserved-redis",
 		},
 	})
-	relEv := makeDiagnosticTestEvidence(uuidStr(2202), "kubernetes", "pod", "default/web", "RESOURCE_REFERENCE", string(depData), t0)
+	relEv := makeDiagnosticTestEvidence(uuidStr(2202), "kubernetes", "pod", "cluster-1/default/web", "RESOURCE_REFERENCE", string(depData), t0)
 
 	batch := state.ObservationBatch{
 		WorkspaceID: ws,
-		ClusterID:   "default",
+		ClusterID:   "cluster-1",
 		RunID:       "run-http-1",
 		Generation:  1,
 		Evidence:    []*corev1.Evidence{podEv, relEv},
@@ -1528,7 +1528,7 @@ func TestHTTP_EndToEnd_DiagnosticsAndCompleteness(t *testing.T) {
 		"target": map[string]interface{}{
 			"provider":      "kubernetes",
 			"resource_type": "pod",
-			"provider_id":   "default/web",
+			"provider_id":   "cluster-1/default/web",
 		},
 		"direction": "incoming",
 		"max_depth": 3,

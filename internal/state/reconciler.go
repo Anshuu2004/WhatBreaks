@@ -138,6 +138,24 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 		return nil, err
 	}
 
+	if strings.Contains(batch.ClusterID, "/") {
+		return nil, fmt.Errorf("%w: batch cluster ID %q cannot contain slashes", ErrMalformedProviderID, batch.ClusterID)
+	}
+
+	if batch.Scope != nil && strings.EqualFold(batch.Scope.Provider, "kubernetes") {
+		if strings.TrimSpace(batch.ClusterID) == "" {
+			return nil, fmt.Errorf("reconciler: kubernetes observation batch missing required cluster ID")
+		}
+		if batch.Scope.ScopeType == "cluster" && batch.Scope.ScopeID != "" && batch.Scope.ScopeID != batch.ClusterID {
+			return nil, fmt.Errorf("reconciler: scope boundary ID %q does not match batch cluster boundary %q", batch.Scope.ScopeID, batch.ClusterID)
+		}
+	}
+	if batch.ScopeSweep != nil && strings.TrimSpace(batch.ScopeSweep.ClusterID) != "" {
+		if strings.TrimSpace(batch.ClusterID) != "" && batch.ScopeSweep.ClusterID != batch.ClusterID {
+			return nil, fmt.Errorf("reconciler: scope sweep cluster ID %q does not match batch cluster boundary %q", batch.ScopeSweep.ClusterID, batch.ClusterID)
+		}
+	}
+
 	// 1. Validate & Transform Evidence + Extract Subject Resources (In-Memory)
 	domainEvidence := make([]Evidence, 0, len(batch.Evidence))
 	incomingSubjectResources := make(map[string]struct {
@@ -171,6 +189,21 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 			Provider:     protoEv.Subject.Provider,
 			ResourceType: protoEv.Subject.ResourceType,
 			ProviderID:   protoEv.Subject.ProviderId,
+		}
+
+		// Enforce Kubernetes identity contract and cluster boundary
+		if strings.EqualFold(subjectID.Provider, "kubernetes") {
+			if strings.TrimSpace(batch.ClusterID) == "" {
+				return nil, fmt.Errorf("reconciler: kubernetes observation batch missing required cluster ID")
+			}
+			if err := ValidateKubernetesResourceIdentity(batch.ClusterID, subjectID); err != nil {
+				return nil, fmt.Errorf("reconciler: evidence %s subject validation failed: %w", protoEv.Id, err)
+			}
+		}
+
+		// Enforce validation on Kubernetes identities embedded in evidence Data (target, owner)
+		if err := ValidateKubernetesEvidenceData(batch.ClusterID, protoEv.Data); err != nil {
+			return nil, fmt.Errorf("reconciler: evidence %s payload validation failed: %w", protoEv.Id, err)
 		}
 
 		domainEvidence = append(domainEvidence, Evidence{
@@ -238,6 +271,18 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 					Provider:     relProto.Target.Provider,
 					ResourceType: relProto.Target.ResourceType,
 					ProviderID:   relProto.Target.ProviderId,
+				}
+
+				// Validate Kubernetes relationship endpoints against batch cluster boundary
+				if strings.EqualFold(src.Provider, "kubernetes") {
+					if err := ValidateKubernetesResourceIdentity(batch.ClusterID, src); err != nil {
+						return nil, fmt.Errorf("reconciler: discovered relationship source validation failed: %w", err)
+					}
+				}
+				if strings.EqualFold(tgt.Provider, "kubernetes") {
+					if err := ValidateKubernetesResourceIdentity(batch.ClusterID, tgt); err != nil {
+						return nil, fmt.Errorf("reconciler: discovered relationship target validation failed: %w", err)
+					}
 				}
 
 				relKey := RelationshipKey{Source: src, Target: tgt, Kind: relProto.Kind}
@@ -443,6 +488,11 @@ func (r *DefaultReconciler) Reconcile(ctx context.Context, batch ObservationBatc
 
 	// 4b.5. Merge any caller-provided diagnostics
 	for _, d := range batch.Diagnostics {
+		if d.ReferencedResource != nil && strings.EqualFold(d.ReferencedResource.Provider, "kubernetes") {
+			if err := ValidateKubernetesResourceIdentity(batch.ClusterID, *d.ReferencedResource); err != nil {
+				return nil, fmt.Errorf("reconciler: diagnostic referenced resource validation failed: %w", err)
+			}
+		}
 		d.WorkspaceID = ws
 		mergeDiagnostic(diagMap, d)
 	}

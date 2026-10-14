@@ -222,12 +222,12 @@ func TestEndToEnd_CollectorObservationToAnswerEngine(t *testing.T) {
 	frontendSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "payments/frontend",
+		ProviderId:   "test-cluster/payments/frontend",
 	}
 	checkoutSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "payments/checkout-service",
+		ProviderId:   "test-cluster/payments/checkout-service",
 	}
 	databaseSubj := &corev1.ResourceIdentity{
 		Provider:     "aws",
@@ -249,6 +249,7 @@ func TestEndToEnd_CollectorObservationToAnswerEngine(t *testing.T) {
 
 	batch := state.ObservationBatch{
 		WorkspaceID: workspaceA,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{conn1, map1, conn2, map2},
 	}
 
@@ -309,14 +310,14 @@ func TestEndToEnd_CollectorObservationToAnswerEngine(t *testing.T) {
 	}
 	// Direct path: checkout-service -> payments-db
 	if len(ansA.Paths[0].Resources) != 2 ||
-		ansA.Paths[0].Resources[0].ProviderID != "payments/checkout-service" ||
+		ansA.Paths[0].Resources[0].ProviderID != "test-cluster/payments/checkout-service" ||
 		ansA.Paths[0].Resources[1].ProviderID != "arn:aws:rds:us-east-1:123:payments-db" {
 		t.Errorf("unexpected direct path: %+v", ansA.Paths[0].Resources)
 	}
 	// Indirect path: frontend -> checkout-service -> payments-db
 	if len(ansA.Paths[1].Resources) != 3 ||
-		ansA.Paths[1].Resources[0].ProviderID != "payments/frontend" ||
-		ansA.Paths[1].Resources[1].ProviderID != "payments/checkout-service" ||
+		ansA.Paths[1].Resources[0].ProviderID != "test-cluster/payments/frontend" ||
+		ansA.Paths[1].Resources[1].ProviderID != "test-cluster/payments/checkout-service" ||
 		ansA.Paths[1].Resources[2].ProviderID != "arn:aws:rds:us-east-1:123:payments-db" {
 		t.Errorf("unexpected indirect path: %+v", ansA.Paths[1].Resources)
 	}
@@ -423,7 +424,7 @@ func TestReconciler_MaterializationLifecycle(t *testing.T) {
 	ordersSubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "default/orders-service",
+		ProviderId:   "test-cluster/default/orders-service",
 	}
 	dbSubj := &corev1.ResourceIdentity{
 		Provider:     "aws",
@@ -433,7 +434,7 @@ func TestReconciler_MaterializationLifecycle(t *testing.T) {
 	gatewaySubj := &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   "default/web-gateway",
+		ProviderId:   "test-cluster/default/web-gateway",
 	}
 
 	conn1 := makeConnectionEvidence("550e8400-e29b-41d4-a716-446655440051", ordersSubj, "10.0.1.5", 5432)
@@ -441,6 +442,7 @@ func TestReconciler_MaterializationLifecycle(t *testing.T) {
 
 	batch1 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{conn1, map1},
 	}
 
@@ -482,13 +484,14 @@ func TestReconciler_MaterializationLifecycle(t *testing.T) {
 		Subject: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "kube-system/kube-dns",
+			ProviderId:   "test-cluster/kube-system/kube-dns",
 		},
 		Data: []byte(`{"status": "running"}`),
 	}
 
 	batch2 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{unrelatedEv},
 	}
 
@@ -524,6 +527,7 @@ func TestReconciler_MaterializationLifecycle(t *testing.T) {
 
 	batch3 := state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{conn3, map3},
 	}
 

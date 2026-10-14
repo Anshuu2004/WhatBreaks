@@ -576,7 +576,7 @@ func TestAuthority_FailedOrCancelledDiscoveryPreservesState(t *testing.T) {
 		}
 		reconciler := state.NewReconciler(s, mockDisc, nil, nil)
 
-		evInitial := newTestEvidence("ev-001", "kubernetes", "pod", "pod-initial", "CONTROL_PLANE_OBJECT", `{}`, t0)
+		evInitial := newTestEvidence("ev-001", "kubernetes", "pod", cluster+"/default/pod-initial", "CONTROL_PLANE_OBJECT", `{}`, t0)
 		res1, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 			WorkspaceID:       ws,
 			ClusterID:         cluster,
@@ -603,7 +603,7 @@ func TestAuthority_FailedOrCancelledDiscoveryPreservesState(t *testing.T) {
 		reconcilerFail := state.NewReconciler(s, failingDisc, nil, nil)
 
 		t1 := t0.Add(5 * time.Minute)
-		evNew := newTestEvidence("ev-002", "kubernetes", "pod", "pod-new", "CONTROL_PLANE_OBJECT", `{}`, t1)
+		evNew := newTestEvidence("ev-002", "kubernetes", "pod", cluster+"/default/pod-new", "CONTROL_PLANE_OBJECT", `{}`, t1)
 
 		_, errFail := reconcilerFail.Reconcile(ctx, state.ObservationBatch{
 			WorkspaceID:       ws,
@@ -633,7 +633,7 @@ func TestAuthority_FailedOrCancelledDiscoveryPreservesState(t *testing.T) {
 
 		// Resources should only contain the initial resource
 		resources, _ := s.ListResources(ctx, ws)
-		if len(resources) != 1 || resources[0].Identity.ProviderID != "pod-initial" {
+		if len(resources) != 1 || resources[0].Identity.ProviderID != cluster+"/default/pod-initial" {
 			t.Errorf("resources were modified despite discovery failure: %+v", resources)
 		}
 	})
@@ -1489,7 +1489,7 @@ func TestAuthority_Regression_D10_StandardCoordinatorSweepsGenerationZero(t *tes
 
 		// Sweep 1
 		t1 := baseTime
-		ev1 := newTestEvidence("ev-1", "kubernetes", "pod", "pod-sweep", "CONTROL_PLANE_OBJECT", `{}`, t1)
+		ev1 := newTestEvidence("ev-1", "kubernetes", "pod", cluster+"/default/pod-sweep", "CONTROL_PLANE_OBJECT", `{}`, t1)
 		res1, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 			WorkspaceID:       ws,
 			ClusterID:         cluster,
@@ -1504,7 +1504,7 @@ func TestAuthority_Regression_D10_StandardCoordinatorSweepsGenerationZero(t *tes
 
 		// Sweep 2
 		t2 := baseTime.Add(2 * time.Minute)
-		ev2 := newTestEvidence("ev-2", "kubernetes", "pod", "pod-sweep", "CONTROL_PLANE_OBJECT", `{}`, t2)
+		ev2 := newTestEvidence("ev-2", "kubernetes", "pod", cluster+"/default/pod-sweep", "CONTROL_PLANE_OBJECT", `{}`, t2)
 		res2, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 			WorkspaceID:       ws,
 			ClusterID:         cluster,
@@ -1519,7 +1519,7 @@ func TestAuthority_Regression_D10_StandardCoordinatorSweepsGenerationZero(t *tes
 
 		// Sweep 3
 		t3 := baseTime.Add(4 * time.Minute)
-		ev3 := newTestEvidence("ev-3", "kubernetes", "pod", "pod-sweep", "CONTROL_PLANE_OBJECT", `{}`, t3)
+		ev3 := newTestEvidence("ev-3", "kubernetes", "pod", cluster+"/default/pod-sweep", "CONTROL_PLANE_OBJECT", `{}`, t3)
 		res3, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 			WorkspaceID:       ws,
 			ClusterID:         cluster,

@@ -551,6 +551,7 @@ func TestKubernetes_RealEndToEndFlow(t *testing.T) {
 
 	batch := state.ObservationBatch{
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		Evidence:    evidenceList,
 	}
 
@@ -1280,6 +1281,7 @@ func TestRealKubernetes_ReconciliationLifecycle(t *testing.T) {
 
 	batch1 := state.ObservationBatch{
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		Evidence:    evidence1,
 	}
 
@@ -1304,6 +1306,7 @@ func TestRealKubernetes_ReconciliationLifecycle(t *testing.T) {
 
 	batch2 := state.ObservationBatch{
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		Evidence:    evidence2,
 	}
 
@@ -1336,6 +1339,7 @@ func TestRealKubernetes_ReconciliationLifecycle(t *testing.T) {
 	// Submit a partial batch containing only the first evidence record
 	partialBatch := state.ObservationBatch{
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		Evidence:    evidence2[:1],
 	}
 

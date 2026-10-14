@@ -3,6 +3,7 @@ package state_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,20 @@ import (
 
 // Helper to construct normalized proto evidence
 func newTestEvidence(id, provider, resType, providerID, obsType, data string, observedAt time.Time) *corev1.Evidence {
+	if strings.EqualFold(provider, "kubernetes") {
+		parts := strings.Split(providerID, "/")
+		if !state.IsClusterScoped(resType) {
+			if len(parts) == 1 {
+				providerID = "test-cluster/default/" + providerID
+			} else if len(parts) == 2 {
+				providerID = "test-cluster/" + providerID
+			}
+		} else {
+			if len(parts) == 1 {
+				providerID = "test-cluster/" + providerID
+			}
+		}
+	}
 	return &corev1.Evidence{
 		Id: id,
 		Source: &corev1.EvidenceSource{
@@ -44,6 +59,7 @@ func TestReconciler_NewResource(t *testing.T) {
 
 	batch := state.ObservationBatch{
 		WorkspaceID: "ws-new-resource",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev},
 	}
 
@@ -66,7 +82,7 @@ func TestReconciler_NewResource(t *testing.T) {
 	storedRes, err := store.GetResource(ctx, "ws-new-resource", state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "default/order-service-pod",
+		ProviderID:   "test-cluster/default/order-service-pod",
 	})
 	if err != nil {
 		t.Fatalf("GetResource failed: %v", err)
@@ -94,6 +110,7 @@ func TestReconciler_RepeatedObservationIdempotency(t *testing.T) {
 
 	batch := state.ObservationBatch{
 		WorkspaceID: "ws-idempotency",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev},
 	}
 
@@ -204,6 +221,7 @@ func TestReconciler_ImmutableEvidence(t *testing.T) {
 	// Ingest original
 	if _, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-immutable",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{originalEv},
 	}); err != nil {
 		t.Fatalf("first Reconcile failed: %v", err)
@@ -212,6 +230,7 @@ func TestReconciler_ImmutableEvidence(t *testing.T) {
 	// Ingest tampered evidence with same ID
 	if _, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-immutable",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{tamperedEv},
 	}); err != nil {
 		t.Fatalf("second Reconcile failed: %v", err)
@@ -251,12 +270,12 @@ func TestReconciler_RelationshipReconciliation(t *testing.T) {
 								Source: &corev1.ResourceIdentity{
 									Provider:     "kubernetes",
 									ResourceType: "pod",
-									ProviderId:   "default/frontend",
+									ProviderId:   "test-cluster/default/frontend",
 								},
 								Target: &corev1.ResourceIdentity{
 									Provider:     "kubernetes",
 									ResourceType: "pod",
-									ProviderId:   "default/backend",
+									ProviderId:   "test-cluster/default/backend",
 								},
 								Kind:     "DEPENDS_ON",
 								Category: "Dependency",
@@ -275,6 +294,7 @@ func TestReconciler_RelationshipReconciliation(t *testing.T) {
 
 	res, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-rel",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev1, ev2},
 	})
 	if err != nil {
@@ -324,12 +344,12 @@ func TestReconciler_RepeatedRelationshipAndEvidence(t *testing.T) {
 		Source: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "default/checkout",
+			ProviderId:   "test-cluster/default/checkout",
 		},
 		Target: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "default/inventory",
+			ProviderId:   "test-cluster/default/inventory",
 		},
 		Kind:     "DEPENDS_ON",
 		Category: "Dependency",
@@ -357,6 +377,7 @@ func TestReconciler_RepeatedRelationshipAndEvidence(t *testing.T) {
 	// Initial observation batch
 	res1, err := reconciler1.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-multi-ev",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev1},
 	})
 	if err != nil {
@@ -385,6 +406,7 @@ func TestReconciler_RepeatedRelationshipAndEvidence(t *testing.T) {
 
 	res2, err := reconciler2.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-multi-ev",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev2},
 	})
 	if err != nil {
@@ -434,6 +456,7 @@ func TestReconciler_WorkspaceIsolation(t *testing.T) {
 	// Reconcile identical resource name in workspace A
 	if _, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "workspace-alpha",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{evA},
 	}); err != nil {
 		t.Fatalf("Reconcile workspace-alpha failed: %v", err)
@@ -442,6 +465,7 @@ func TestReconciler_WorkspaceIsolation(t *testing.T) {
 	// Reconcile identical resource name in workspace B
 	if _, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "workspace-beta",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{evB},
 	}); err != nil {
 		t.Fatalf("Reconcile workspace-beta failed: %v", err)
@@ -483,6 +507,7 @@ func TestReconciler_MissingObservationDoesNotDeleteState(t *testing.T) {
 	// Initial sweep: all 3 pods observed
 	_, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-gap",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{pod1, pod2, pod3},
 	})
 	if err != nil {
@@ -499,6 +524,7 @@ func TestReconciler_MissingObservationDoesNotDeleteState(t *testing.T) {
 	pod1Later := newTestEvidence("ev-gap-1b", "kubernetes", "pod", "default/pod-1", "CONTROL_PLANE_OBJECT", `{}`, t1)
 	resPartial, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-gap",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{pod1Later},
 	})
 	if err != nil {
@@ -521,6 +547,7 @@ func TestReconciler_MissingObservationDoesNotDeleteState(t *testing.T) {
 	// Empty sweep: collector returns 0 observations
 	resEmpty, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-gap",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{},
 	})
 	if err != nil {
@@ -552,6 +579,7 @@ func TestReconciler_ScopeBoundaryPreservesState(t *testing.T) {
 	// Ingest across namespaces
 	_, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-scope",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{pod1, pod2},
 	})
 	if err != nil {
@@ -562,6 +590,7 @@ func TestReconciler_ScopeBoundaryPreservesState(t *testing.T) {
 	pod1Updated := newTestEvidence("ev-scope-1b", "kubernetes", "pod", "default/service-a", "CONTROL_PLANE_OBJECT", `{}`, t0.Add(time.Minute))
 	_, err = reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-scope",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{pod1Updated},
 		Scope: &state.ScopeBoundary{
 			Provider:  "kubernetes",
@@ -578,7 +607,7 @@ func TestReconciler_ScopeBoundaryPreservesState(t *testing.T) {
 	storedCoreDNS, err := store.GetResource(ctx, "ws-scope", state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "kube-system/coredns",
+		ProviderID:   "test-cluster/kube-system/coredns",
 	})
 	if err != nil {
 		t.Fatalf("kube-system/coredns was unexpectedly deleted: %v", err)
@@ -610,6 +639,7 @@ func TestReconciler_ConcurrentReconciliation(t *testing.T) {
 
 			batch := state.ObservationBatch{
 				WorkspaceID: "ws-concurrent-rec",
+				ClusterID:   "test-cluster",
 				Evidence: []*corev1.Evidence{
 					newTestEvidence(evID, "kubernetes", "pod", podID, "CONTROL_PLANE_OBJECT", `{}`, time.Now().UTC()),
 				},
@@ -660,12 +690,12 @@ func TestReconciler_PartialCollectionSafety_MemoryStore(t *testing.T) {
 		Source: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "default/fe",
+			ProviderId:   "test-cluster/default/fe",
 		},
 		Target: &corev1.ResourceIdentity{
 			Provider:     "kubernetes",
 			ResourceType: "pod",
-			ProviderId:   "default/be",
+			ProviderId:   "test-cluster/default/be",
 		},
 		Kind:     "CALLS",
 		Category: "Invocation",
@@ -694,6 +724,7 @@ func TestReconciler_PartialCollectionSafety_MemoryStore(t *testing.T) {
 	// 1. Initial collection sweep: fe and be observed, rel derived
 	res1, err := reconciler.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev1, ev2},
 	})
 	if err != nil {
@@ -714,6 +745,7 @@ func TestReconciler_PartialCollectionSafety_MemoryStore(t *testing.T) {
 
 	res2, err := reconcilerPartial.Reconcile(ctx, state.ObservationBatch{
 		WorkspaceID: ws,
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev3},
 	})
 	if err != nil {
@@ -736,7 +768,7 @@ func TestReconciler_PartialCollectionSafety_MemoryStore(t *testing.T) {
 	beRes, err := store.GetResource(ctx, ws, state.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderID:   "default/be",
+		ProviderID:   "test-cluster/default/be",
 	})
 	if err != nil || beRes == nil {
 		t.Fatalf("omitted resource default/be was deleted or not found: %v", err)

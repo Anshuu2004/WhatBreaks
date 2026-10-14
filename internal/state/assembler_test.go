@@ -27,7 +27,7 @@ func protoPod(name string) *corev1.ResourceIdentity {
 	return &corev1.ResourceIdentity{
 		Provider:     "kubernetes",
 		ResourceType: "pod",
-		ProviderId:   fmt.Sprintf("default/%s", name),
+		ProviderId:   fmt.Sprintf("test-cluster/default/%s", name),
 	}
 }
 
@@ -102,6 +102,7 @@ func TestAssembler_DiscoveryOutcomes(t *testing.T) {
 
 	res, err := assembler.Ingest(ctx, state.ObservationBatch{
 		WorkspaceID: "ws-test",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev1, ev2},
 	})
 	if err != nil {
@@ -133,7 +134,7 @@ func TestAssembler_DiscoveryOutcomes(t *testing.T) {
 	if len(rels) != 1 {
 		t.Fatalf("expected exactly 1 relationship in store, got %d", len(rels))
 	}
-	if rels[0].Source.ProviderID != "default/orders-api" || rels[0].Target.ProviderID != "default/payments-api" {
+	if rels[0].Source.ProviderID != "test-cluster/default/orders-api" || rels[0].Target.ProviderID != "test-cluster/default/payments-api" {
 		t.Errorf("unexpected relationship in store: %+v", rels[0])
 	}
 
@@ -191,6 +192,7 @@ func TestAssembler_RepeatedIngestion(t *testing.T) {
 
 	batch := state.ObservationBatch{
 		WorkspaceID: "ws-repeat",
+		ClusterID:   "test-cluster",
 		Evidence:    []*corev1.Evidence{ev1, ev2},
 	}
 
@@ -246,6 +248,7 @@ func TestAssembler_ConcurrentIngestion(t *testing.T) {
 			podName := fmt.Sprintf("worker-pod-%d", workerID)
 			batch := state.ObservationBatch{
 				WorkspaceID: "ws-concurrent",
+				ClusterID:   "test-cluster",
 				Evidence:    []*corev1.Evidence{protoEvidence(evID, protoPod(podName))},
 			}
 			if _, err := assembler.Ingest(ctx, batch); err != nil {

@@ -504,7 +504,7 @@ func TestRecovery_REC09_ConcurrentReconciliationAndRecovery(t *testing.T) {
 	now := time.Now().UTC()
 	ws := "ws-concurrent-test"
 	_ = memStore.SaveResources(ctx, ws, []state.Resource{
-		{Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "p1"}, FirstObservedAt: now, LastObservedAt: now},
+		{Identity: state.ResourceIdentity{Provider: "k8s", ResourceType: "pod", ProviderID: "cluster-1/default/p1"}, FirstObservedAt: now, LastObservedAt: now},
 	})
 
 	mockClient := &recordingLoader{}
@@ -566,6 +566,13 @@ func (r *recordingLoader) LoadState(ctx context.Context, req *corev1.LoadStateRe
 	return &corev1.LoadStateResponse{
 		WorkspaceId:         req.WorkspaceId,
 		RelationshipsLoaded: uint32(len(req.Relationships)),
+	}, nil
+}
+
+func (r *recordingLoader) InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error) {
+	return &corev1.InvalidateWorkspaceResponse{
+		WorkspaceId: req.WorkspaceId,
+		Invalidated: true,
 	}, nil
 }
 
