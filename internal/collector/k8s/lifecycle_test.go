@@ -20,7 +20,7 @@ func TestCollector_Lifecycle(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	collector, err := New(WithClient(client))
+	collector, err := New(WithClient(client), WithClusterID("test-cluster"))
 	if err != nil {
 		t.Fatalf("failed to create collector: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestCollector_ConcurrentStop(t *testing.T) {
 	defer server.Close()
 
 	client, _ := NewRESTClient(ClientConfig{BaseURL: server.URL})
-	collector, _ := New(WithClient(client))
+	collector, _ := New(WithClient(client), WithClusterID("test-cluster"))
 
 	ctx := context.Background()
 	if err := collector.Start(ctx); err != nil {

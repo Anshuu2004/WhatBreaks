@@ -1,10 +1,10 @@
 package k8s
 
 import (
-	"fmt"
 	"strings"
 
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
+	"github.com/aaradhychinche-alt/WhatBreaks/internal/state"
 )
 
 const (
@@ -17,54 +17,43 @@ const (
 
 // Supported Resource Types
 const (
-	TypeNamespace             = "namespace"
-	TypeNode                  = "node"
-	TypeDeployment            = "deployment"
-	TypeReplicaSet            = "replicaset"
-	TypeStatefulSet           = "statefulset"
-	TypeDaemonSet             = "daemonset"
-	TypePod                   = "pod"
-	TypeService               = "service"
-	TypeIngress               = "ingress"
-	TypeConfigMap             = "configmap"
-	TypeSecret                = "secret"
-	TypePersistentVolume      = "persistentvolume"
-	TypePersistentVolumeClaim = "persistentvolumeclaim"
-	TypeServiceAccount        = "serviceaccount"
-	TypeEndpointSlice         = "endpointslice"
+	TypeNamespace             = state.TypeNamespace
+	TypeNode                  = state.TypeNode
+	TypeDeployment            = state.TypeDeployment
+	TypeReplicaSet            = state.TypeReplicaSet
+	TypeStatefulSet           = state.TypeStatefulSet
+	TypeDaemonSet             = state.TypeDaemonSet
+	TypePod                   = state.TypePod
+	TypeService               = state.TypeService
+	TypeIngress               = state.TypeIngress
+	TypeConfigMap             = state.TypeConfigMap
+	TypeSecret                = state.TypeSecret
+	TypePersistentVolume      = state.TypePersistentVolume
+	TypePersistentVolumeClaim = state.TypePersistentVolumeClaim
+	TypeServiceAccount        = state.TypeServiceAccount
+	TypeEndpointSlice         = state.TypeEndpointSlice
 )
 
 // IsClusterScoped reports whether a Kubernetes resource type is scoped to the cluster rather than a namespace.
 func IsClusterScoped(resourceType string) bool {
-	switch strings.ToLower(resourceType) {
-	case TypeNamespace, TypeNode, TypePersistentVolume:
-		return true
-	default:
-		return false
-	}
+	return state.IsClusterScoped(resourceType)
 }
 
 // BuildIdentity constructs a canonical ResourceIdentity adhering to the WhatBreaks model.
-// For cluster-scoped resources: provider_id = "<cluster_id>/<name>" (or "<name>" if cluster_id is empty).
-// For namespaced resources: provider_id = "<cluster_id>/<namespace>/<name>" (or "<namespace>/<name>" if cluster_id is empty).
+// For cluster-scoped resources: provider_id = "<cluster_id>/<name>".
+// For namespaced resources: provider_id = "<cluster_id>/<namespace>/<name>".
+// It uses state.BuildKubernetesProviderID to ensure a single consistent implementation.
 func BuildIdentity(clusterID, resourceType, namespace, name string) *corev1.ResourceIdentity {
 	resourceType = strings.ToLower(resourceType)
-	var providerID string
-
-	if IsClusterScoped(resourceType) || namespace == "" {
-		if clusterID != "" {
-			providerID = fmt.Sprintf("%s/%s", clusterID, name)
-		} else {
-			providerID = name
-		}
-	} else {
-		if clusterID != "" {
-			providerID = fmt.Sprintf("%s/%s/%s", clusterID, namespace, name)
-		} else {
-			providerID = fmt.Sprintf("%s/%s", namespace, name)
+	providerID, err := state.BuildKubernetesProviderID(clusterID, resourceType, namespace, name)
+	if err != nil {
+		// Never silently convert a missing or invalid cluster ID into an unqualified identity
+		return &corev1.ResourceIdentity{
+			Provider:     ProviderKubernetes,
+			ResourceType: resourceType,
+			ProviderId:   "",
 		}
 	}
-
 	return &corev1.ResourceIdentity{
 		Provider:     ProviderKubernetes,
 		ResourceType: resourceType,
@@ -73,27 +62,9 @@ func BuildIdentity(clusterID, resourceType, namespace, name string) *corev1.Reso
 }
 
 // ParseProviderID extracts cluster, namespace, and resource name components from a provider_id.
+// It delegates to state.ParseKubernetesProviderID to ensure a single consistent implementation.
 func ParseProviderID(providerID string, isClusterScoped bool) (clusterID, namespace, name string, err error) {
-	parts := strings.Split(providerID, "/")
-	if isClusterScoped {
-		switch len(parts) {
-		case 1:
-			return "", "", parts[0], nil
-		case 2:
-			return parts[0], "", parts[1], nil
-		default:
-			return "", "", "", fmt.Errorf("malformed cluster-scoped provider_id: %s", providerID)
-		}
-	}
-
-	switch len(parts) {
-	case 2:
-		return "", parts[0], parts[1], nil
-	case 3:
-		return parts[0], parts[1], parts[2], nil
-	default:
-		return "", "", "", fmt.Errorf("malformed namespaced provider_id: %s", providerID)
-	}
+	return state.ParseKubernetesProviderID(providerID, isClusterScoped)
 }
 
 // BuildSource constructs an EvidenceSource record for this collector.

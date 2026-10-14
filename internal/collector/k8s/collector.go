@@ -20,6 +20,7 @@ var (
 	ErrCollectorRunning   = errors.New("k8s collector: already running")
 	ErrCollectorStopped   = errors.New("k8s collector: stopped")
 	ErrMissingClient      = errors.New("k8s collector: client is required")
+	ErrMissingClusterID   = errors.New("k8s collector: cluster ID is required")
 	ErrCoreClientNotBound = errors.New("k8s collector: core client is not configured")
 )
 
@@ -67,6 +68,9 @@ func New(opts ...Option) (*Collector, error) {
 		c.scopePolicy = DefaultScopePolicy()
 	}
 
+	if strings.TrimSpace(c.clusterID) == "" {
+		return nil, ErrMissingClusterID
+	}
 	if c.client == nil {
 		return nil, ErrMissingClient
 	}

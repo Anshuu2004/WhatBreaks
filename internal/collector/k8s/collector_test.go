@@ -288,12 +288,34 @@ func TestCollector_ScopePolicy_Completeness(t *testing.T) {
 	}
 }
 
+func TestCollector_RejectsEmptyClusterID(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer mockServer.Close()
+
+	client, err := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	// Missing cluster ID entirely
+	_, err = New(WithClient(client))
+	if !errors.Is(err, ErrMissingClusterID) {
+		t.Fatalf("expected ErrMissingClusterID, got %v", err)
+	}
+
+	// Whitespace-only cluster ID
+	_, err = New(WithClient(client), WithClusterID("   "))
+	if !errors.Is(err, ErrMissingClusterID) {
+		t.Fatalf("expected ErrMissingClusterID for whitespace, got %v", err)
+	}
+}
+
 func TestCollector_CoreClientNotBound(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer mockServer.Close()
 
 	client, _ := NewRESTClient(ClientConfig{BaseURL: mockServer.URL})
-	collector, _ := New(WithClient(client))
+	collector, _ := New(WithClient(client), WithClusterID("test-cluster"))
 
 	_, err := collector.SubmitToCore(context.Background(), nil)
 	if !strings.Contains(err.Error(), "core client is not configured") {

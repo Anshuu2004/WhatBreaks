@@ -1,7 +1,10 @@
 package k8s
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/aaradhychinche-alt/WhatBreaks/internal/state"
 )
 
 func TestIdentity_Namespaced(t *testing.T) {
@@ -55,14 +58,26 @@ func TestIdentity_ClusterScoped(t *testing.T) {
 }
 
 func TestIdentity_NoClusterID(t *testing.T) {
+	// Construction with empty cluster ID must not silently proceed or create unqualified identities
 	idNamespaced := BuildIdentity("", TypePod, "payments", "api-123")
-	if idNamespaced.ProviderId != "payments/api-123" {
-		t.Errorf("expected 'payments/api-123', got %q", idNamespaced.ProviderId)
+	if idNamespaced.ProviderId != "" {
+		t.Errorf("expected empty provider_id when cluster_id is missing, got %q", idNamespaced.ProviderId)
 	}
 
 	idCluster := BuildIdentity("", TypeNamespace, "", "kube-system")
-	if idCluster.ProviderId != "kube-system" {
-		t.Errorf("expected 'kube-system', got %q", idCluster.ProviderId)
+	if idCluster.ProviderId != "" {
+		t.Errorf("expected empty provider_id when cluster_id is missing, got %q", idCluster.ProviderId)
+	}
+
+	// Parsing legacy/unqualified IDs without cluster prefix must return ErrUnqualifiedProviderID
+	_, _, _, err := ParseProviderID("payments/api-123", false)
+	if !errors.Is(err, state.ErrUnqualifiedProviderID) {
+		t.Errorf("expected ErrUnqualifiedProviderID for 2-segment namespaced ID, got %v", err)
+	}
+
+	_, _, _, err = ParseProviderID("kube-system", true)
+	if !errors.Is(err, state.ErrUnqualifiedProviderID) {
+		t.Errorf("expected ErrUnqualifiedProviderID for 1-segment cluster-scoped ID, got %v", err)
 	}
 }
 
