@@ -1,6 +1,7 @@
 package answer_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,9 +17,12 @@ import (
 )
 
 type mockCoreClient struct {
-	lastReq *corev1.AnalyzeImpactRequest
-	resp    *corev1.AnalyzeImpactResponse
-	err     error
+	lastReq         *corev1.AnalyzeImpactRequest
+	resp            *corev1.AnalyzeImpactResponse
+	err             error
+	invalidateErr   error
+	invalidateCalls int
+	lastInvReq      *corev1.InvalidateWorkspaceRequest
 }
 
 func (m *mockCoreClient) AnalyzeImpact(ctx context.Context, req *corev1.AnalyzeImpactRequest, opts ...grpc.CallOption) (*corev1.AnalyzeImpactResponse, error) {
@@ -30,6 +34,11 @@ func (m *mockCoreClient) AnalyzeImpact(ctx context.Context, req *corev1.AnalyzeI
 }
 
 func (m *mockCoreClient) InvalidateWorkspace(ctx context.Context, req *corev1.InvalidateWorkspaceRequest, opts ...grpc.CallOption) (*corev1.InvalidateWorkspaceResponse, error) {
+	m.invalidateCalls++
+	m.lastInvReq = req
+	if m.invalidateErr != nil {
+		return nil, m.invalidateErr
+	}
 	return &corev1.InvalidateWorkspaceResponse{WorkspaceId: req.WorkspaceId, Invalidated: true}, nil
 }
 
@@ -666,5 +675,152 @@ func TestService_LegacyRequest_PreservesNilAssessmentAndEmptyFields(t *testing.T
 	}
 	if resp.ImpactedResources[0].ImpactReason != "" {
 		t.Errorf("expected empty ImpactReason for legacy query, got %q", resp.ImpactedResources[0].ImpactReason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Core Engine invalidation failure after integrity rejection is observable
+// ---------------------------------------------------------------------------
+type mockIntegrityChecker struct {
+	err    error
+	calls  int
+	lastWS string
+}
+
+func (m *mockIntegrityChecker) CheckWorkspaceIntegrity(ctx context.Context, workspaceID string) error {
+	m.calls++
+	m.lastWS = workspaceID
+	return m.err
+}
+
+func TestService_IntegrityRejection_InvalidationFailureObservable(t *testing.T) {
+	sentinelIntegrityErr := errors.New("workspace contains un-migrated legacy state")
+	sentinelInvErr := errors.New("core engine gRPC connection lost")
+
+	mockCore := &mockCoreClient{
+		invalidateErr: sentinelInvErr,
+	}
+	checker := &mockIntegrityChecker{
+		err: sentinelIntegrityErr,
+	}
+
+	var logBuf bytes.Buffer
+	logger := logging.NewJSONLogger(&logBuf, logging.LevelDebug, "answer-service")
+
+	svc := answer.NewService(
+		mockCore,
+		logger,
+		answer.WithWorkspaceIntegrityChecker(checker),
+	)
+
+	wsID := "ws-integrity-invalidation-obs-test"
+	req := answer.ImpactRequest{
+		WorkspaceID: wsID,
+		Target: &answer.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "cluster-1/default/payments-api",
+		},
+		Direction: "incoming",
+		MaxDepth:  3,
+	}
+
+	resp, err := svc.AnalyzeImpact(context.Background(), req)
+
+	// 1. Must return an error, and response must be nil
+	if resp != nil {
+		t.Errorf("expected nil response on integrity rejection, got %+v", resp)
+	}
+	if err == nil {
+		t.Fatalf("expected error on integrity rejection, got nil")
+	}
+
+	// 2. Original rejection error remains the returned error (IdentityIntegrityError wrapping ErrIdentityIntegrityRejected)
+	if !errors.Is(err, answer.ErrIdentityIntegrityRejected) {
+		t.Errorf("expected error to wrap ErrIdentityIntegrityRejected, got: %v", err)
+	}
+	var iErr *answer.IdentityIntegrityError
+	if !errors.As(err, &iErr) {
+		t.Fatalf("expected *answer.IdentityIntegrityError, got %T (%v)", err, err)
+	}
+	if iErr.WorkspaceID != wsID {
+		t.Errorf("expected WorkspaceID %q, got %q", wsID, iErr.WorkspaceID)
+	}
+	if !strings.Contains(iErr.Reason, sentinelIntegrityErr.Error()) {
+		t.Errorf("expected error Reason to contain %q, got %q", sentinelIntegrityErr.Error(), iErr.Reason)
+	}
+
+	// 3. Must NOT replace or wrap with the invalidation error in the returned error
+	if errors.Is(err, sentinelInvErr) {
+		t.Errorf("returned error must NOT wrap the Core Engine invalidation error")
+	}
+
+	// 4. Invalidation was attempted on the Core Client for this workspace
+	if mockCore.invalidateCalls != 1 {
+		t.Errorf("expected exactly 1 InvalidateWorkspace call, got %d", mockCore.invalidateCalls)
+	}
+	if mockCore.lastInvReq == nil || mockCore.lastInvReq.WorkspaceId != wsID {
+		t.Errorf("expected InvalidateWorkspace request for workspace %q, got %+v", wsID, mockCore.lastInvReq)
+	}
+
+	// 5. Invalidation failure is observable in the logs
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "Failed to invalidate workspace in Core Engine after integrity rejection") {
+		t.Errorf("expected log output to record invalidation failure, got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, wsID) {
+		t.Errorf("expected log output to include workspace ID %q, got: %s", wsID, logOutput)
+	}
+	if !strings.Contains(logOutput, sentinelInvErr.Error()) {
+		t.Errorf("expected log output to include invalidation error %q, got: %s", sentinelInvErr.Error(), logOutput)
+	}
+}
+
+func TestService_IntegrityRejection_InvalidationSuccess(t *testing.T) {
+	sentinelIntegrityErr := errors.New("workspace contains un-migrated legacy state")
+	mockCore := &mockCoreClient{}
+	checker := &mockIntegrityChecker{
+		err: sentinelIntegrityErr,
+	}
+
+	var logBuf bytes.Buffer
+	logger := logging.NewJSONLogger(&logBuf, logging.LevelDebug, "answer-service")
+
+	svc := answer.NewService(
+		mockCore,
+		logger,
+		answer.WithWorkspaceIntegrityChecker(checker),
+	)
+
+	wsID := "ws-integrity-invalidation-success-test"
+	req := answer.ImpactRequest{
+		WorkspaceID: wsID,
+		Target: &answer.ResourceIdentity{
+			Provider:     "kubernetes",
+			ResourceType: "pod",
+			ProviderID:   "cluster-1/default/payments-api",
+		},
+		Direction: "incoming",
+		MaxDepth:  3,
+	}
+
+	resp, err := svc.AnalyzeImpact(context.Background(), req)
+	if resp != nil {
+		t.Errorf("expected nil response on integrity rejection, got %+v", resp)
+	}
+	if err == nil {
+		t.Fatalf("expected error on integrity rejection, got nil")
+	}
+	if !errors.Is(err, answer.ErrIdentityIntegrityRejected) {
+		t.Errorf("expected error to wrap ErrIdentityIntegrityRejected, got: %v", err)
+	}
+
+	if mockCore.invalidateCalls != 1 {
+		t.Errorf("expected 1 InvalidateWorkspace call, got %d", mockCore.invalidateCalls)
+	}
+
+	logOutput := logBuf.String()
+	if strings.Contains(logOutput, "Failed to invalidate workspace in Core Engine") {
+		t.Errorf("unexpected invalidation failure log when invalidation succeeded: %s", logOutput)
 	}
 }

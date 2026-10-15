@@ -97,9 +97,14 @@ func (s *service) AnalyzeImpact(ctx context.Context, req ImpactRequest) (*Impact
 			)
 			// Evict the workspace graph from the Rust Core Engine so previously materialized state cannot be served
 			if s.client != nil {
-				_, _ = s.client.InvalidateWorkspace(ctx, &corev1.InvalidateWorkspaceRequest{
+				if _, invErr := s.client.InvalidateWorkspace(ctx, &corev1.InvalidateWorkspaceRequest{
 					WorkspaceId: req.WorkspaceID,
-				})
+				}); invErr != nil {
+					s.logger.Warn("Failed to invalidate workspace in Core Engine after integrity rejection",
+						"workspace_id", req.WorkspaceID,
+						"error", invErr.Error(),
+					)
+				}
 			}
 			return nil, &IdentityIntegrityError{
 				WorkspaceID: req.WorkspaceID,
