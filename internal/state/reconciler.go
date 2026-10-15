@@ -679,12 +679,12 @@ type LegacyStateRecoverer interface {
 }
 
 // RecoverLegacyState performs safe, authoritative administrative legacy recovery for a workspace:
-// 1. Validates that destructive recovery is explicitly authorized (params.AuthorizeDestructive == true).
-// 2. Acquires the workspace serialization lock to prevent races with ongoing reconciliations or materializations.
-// 3. Executes the underlying Store's transactional recovery (archiving legacy resources, relationships,
-//    provenance, and diagnostics while strictly preserving historical evidence and non-K8s provider state).
-// 4. Ingests any provided authoritative recollection batch.
-// 5. If a materializer is configured, refreshes the Rust Core Engine with the authoritative clean state.
+//  1. Validates that destructive recovery is explicitly authorized (params.AuthorizeDestructive == true).
+//  2. Acquires the workspace serialization lock to prevent races with ongoing reconciliations or materializations.
+//  3. Executes the underlying Store's transactional recovery (archiving legacy resources, relationships,
+//     provenance, and diagnostics while strictly preserving historical evidence and non-K8s provider state).
+//  4. Ingests any provided authoritative recollection batch.
+//  5. If a materializer is configured, refreshes the Rust Core Engine with the authoritative clean state.
 func (r *DefaultReconciler) RecoverLegacyState(ctx context.Context, params LegacyRecoveryParams) (*LegacyRecoveryResult, error) {
 	if !params.AuthorizeDestructive {
 		return nil, ErrUnauthorizedDestructiveAction
@@ -699,7 +699,13 @@ func (r *DefaultReconciler) RecoverLegacyState(ctx context.Context, params Legac
 
 	// Invalidate workspace in Core Engine immediately before recovery so no queries can run against stale state.
 	if r.materializer != nil {
-		_ = r.materializer.InvalidateWorkspace(ctx, params.WorkspaceID)
+		if err := r.materializer.InvalidateWorkspace(ctx, params.WorkspaceID); err != nil {
+			r.logger.Error("Refusing legacy recovery because workspace invalidation failed",
+				"workspace_id", params.WorkspaceID,
+				"error", err.Error(),
+			)
+			return nil, fmt.Errorf("refusing legacy recovery because workspace invalidation failed: %w", err)
+		}
 	}
 
 	result, err := r.store.RecoverWorkspaceLegacyState(ctx, params)
