@@ -114,16 +114,17 @@ func (c *Collector) Start(ctx context.Context) error {
 	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pingCancel()
 
-	if err := c.client.Ping(pingCtx); err != nil {
-		c.logger.Warn("Kubernetes API ping check returned error", "error", err.Error())
-		// If ping endpoint (/readyz) is unavailable on older/custom clusters, proceed with initial list
-	}
-
+	pingErr := c.client.Ping(pingCtx)
 	c.mu.Lock()
-	c.ready = true
+	if pingErr != nil {
+		c.logger.Warn("Kubernetes API ping check returned error", "error", pingErr.Error())
+		c.ready = false
+	} else {
+		c.ready = true
+		c.logger.Info("Kubernetes Collector initialized and ready")
+	}
 	c.mu.Unlock()
 
-	c.logger.Info("Kubernetes Collector initialized and ready")
 	return nil
 }
 
@@ -208,7 +209,7 @@ func (c *Collector) ClusterID() string {
 	return c.clusterID
 }
 
-// Ping verifies connectivity to the underlying Kubernetes API server.
+// Ping verifies connectivity to the underlying Kubernetes API server and updates ready status.
 func (c *Collector) Ping(ctx context.Context) error {
 	c.mu.RLock()
 	client := c.client
@@ -216,7 +217,15 @@ func (c *Collector) Ping(ctx context.Context) error {
 	if client == nil {
 		return ErrMissingClient
 	}
-	return client.Ping(ctx)
+	err := client.Ping(ctx)
+	c.mu.Lock()
+	if err == nil {
+		c.ready = true
+	} else {
+		c.ready = false
+	}
+	c.mu.Unlock()
+	return err
 }
 
 // ---------------------------------------------------------------------------
