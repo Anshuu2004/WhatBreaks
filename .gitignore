@@ -22,3 +22,7 @@ Thumbs.db
 
 # Proto: generated Rust code lives in core-engine-proto/target/ (already covered above)
 # The .proto source and build.rs are committed; Rust gen happens at cargo build time.
+
+# Local binaries and runtime state
+bin/
+.run/
