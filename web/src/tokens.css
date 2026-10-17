@@ -1,0 +1,50 @@
+/* WhatBreaks Design Tokens — monochrome retro engineering workstation */
+:root {
+  /* Backgrounds */
+  --bg-app:      #080808;
+  --bg-sidebar:  #0d0d0d;
+  --bg-panel:    #111111;
+  --bg-elevated: #161616;
+  --bg-hover:    #1a1a1a;
+  --bg-active:   #d5d5d5;
+
+  /* Borders */
+  --border:       #2a2a2a;
+  --border-mid:   #3a3a3a;
+  --border-strong:#505050;
+
+  /* Text */
+  --text-primary:   #e8e8e8;
+  --text-secondary: #a0a0a0;
+  --text-dim:       #606060;
+  --text-on-active: #111111;
+
+  /* Status */
+  --status-ok:      #55c878;
+  --status-warn:    #c99a42;
+  --status-error:   #d65a5a;
+  --status-ok-bg:   rgba(85,200,120,0.12);
+  --status-warn-bg: rgba(201,154,66,0.12);
+  --status-err-bg:  rgba(214,90,90,0.12);
+
+  /* Risk */
+  --risk-high:   #d65a5a;
+  --risk-medium: #c99a42;
+  --risk-low:    #55c878;
+  --risk-high-bg:   rgba(214,90,90,0.15);
+  --risk-medium-bg: rgba(201,154,66,0.15);
+  --risk-low-bg:    rgba(85,200,120,0.15);
+
+  /* Typography */
+  --font-sans: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Radii — square feel */
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 4px;
+
+  /* Sidebar */
+  --sidebar-w: 260px;
+  --topbar-h:  40px;
+}

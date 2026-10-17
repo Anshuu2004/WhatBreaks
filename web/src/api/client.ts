@@ -66,9 +66,31 @@ export async function checkHealth(): Promise<{ status: string; environment?: str
   return handleResponse<{ status: string; environment?: string }>(res);
 }
 
+export async function getSystemHealth(): Promise<import("../types").SystemHealthResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/system/health`, {
+    method: "GET",
+    credentials: "include",
+  });
+  return handleResponse<import("../types").SystemHealthResponse>(res);
+}
+
+export async function listClusters(
+  workspaceId: string = DEFAULT_WORKSPACE_ID
+): Promise<import("../types").ListClustersResponse> {
+  const params = new URLSearchParams({ workspace_id: workspaceId });
+  const res = await fetch(`${API_BASE_URL}/api/v1/clusters?${params.toString()}`, {
+    method: "GET",
+    headers: {
+      "X-Workspace-ID": workspaceId,
+    },
+    credentials: "include",
+  });
+  return handleResponse<import("../types").ListClustersResponse>(res);
+}
+
 export async function listResources(
   workspaceId: string = DEFAULT_WORKSPACE_ID,
-  filter?: { type?: string; search?: string }
+  filter?: { type?: string; search?: string; cluster?: string }
 ): Promise<ListResourcesResponse> {
   const params = new URLSearchParams();
   params.set("workspace_id", workspaceId);
@@ -77,6 +99,9 @@ export async function listResources(
   }
   if (filter?.search) {
     params.set("search", filter.search.trim());
+  }
+  if (filter?.cluster && filter.cluster !== "all") {
+    params.set("cluster", filter.cluster.trim());
   }
 
   const res = await fetch(`${API_BASE_URL}/api/v1/resources?${params.toString()}`, {
@@ -88,6 +113,27 @@ export async function listResources(
   });
 
   return handleResponse<ListResourcesResponse>(res);
+}
+
+export async function listDependencies(
+  workspaceId: string = DEFAULT_WORKSPACE_ID,
+  cluster?: string
+): Promise<import("../types").ListDependenciesResponse> {
+  const params = new URLSearchParams();
+  params.set("workspace_id", workspaceId);
+  if (cluster && cluster !== "all") {
+    params.set("cluster", cluster.trim());
+  }
+
+  const res = await fetch(`${API_BASE_URL}/api/v1/dependencies?${params.toString()}`, {
+    method: "GET",
+    headers: {
+      "X-Workspace-ID": workspaceId,
+    },
+    credentials: "include",
+  });
+
+  return handleResponse<import("../types").ListDependenciesResponse>(res);
 }
 
 export async function getResourceDetail(

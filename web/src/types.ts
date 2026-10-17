@@ -16,6 +16,7 @@ export interface ListResourcesResponse {
   workspace_id: string;
   total: number;
   resources: ResourceItem[];
+  clusters?: string[];
 }
 
 export interface ResourceRelationshipItem {
@@ -28,6 +29,56 @@ export interface ResourceRelationshipItem {
   evidence_ids?: string[];
   first_observed_at: string;
   last_observed_at: string;
+}
+
+export interface DependencyRelationship {
+  source: ResourceIdentity;
+  target: ResourceIdentity;
+  kind: string;
+  category: string;
+  first_observed_at: string;
+  last_observed_at: string;
+}
+
+export interface ListDependenciesResponse {
+  workspace_id: string;
+  total: number;
+  relationships: DependencyRelationship[];
+}
+
+export interface ComponentHealth {
+  status: "healthy" | "degraded" | "unavailable" | "not_configured" | string;
+  message?: string;
+  details?: Record<string, any>;
+}
+
+export interface ClusterDetail {
+  name: string;
+  active: boolean;
+  connected: boolean;
+  status: "not_configured" | "unreachable" | "pending_sync" | "connected_empty" | "connected_with_resources" | string;
+  resource_count: number;
+  has_synced: boolean;
+  last_synced_at?: string;
+  error?: string;
+}
+
+export interface ListClustersResponse {
+  workspace_id: string;
+  active_cluster?: string;
+  configured: boolean;
+  connected: boolean;
+  status: string;
+  error?: string;
+  clusters: ClusterDetail[];
+}
+
+export interface SystemHealthResponse {
+  status: "healthy" | "degraded" | "unavailable" | string;
+  timestamp: string;
+  uptime: number;
+  environment: string;
+  components: Record<string, ComponentHealth>;
 }
 
 export interface ResourceDetailResponse {
@@ -122,6 +173,21 @@ export interface ChangeAssessment {
   limitations: string[];
 }
 
+export interface AnalysisCompleteness {
+  is_complete: boolean;
+  status: "COMPLETE" | "PARTIAL" | "DEGRADED" | string;
+  reasons?: string[];
+}
+
+export interface DiagnosticItem {
+  code: string;
+  severity: "INFO" | "WARNING" | "ERROR" | string;
+  message: string;
+  relevance?: string;
+  completeness_impact?: string;
+  evidence_ids?: string[];
+}
+
 export interface ImpactAnswer {
   target: ResourceIdentity;
   summary: ImpactSummary;
@@ -131,6 +197,8 @@ export interface ImpactAnswer {
   evidence: AnswerEvidence[];
   explanation_facts: ExplanationFact[];
   change_assessment?: ChangeAssessment;
+  completeness?: AnalysisCompleteness;
+  diagnostics?: DiagnosticItem[];
 }
 
 export interface ApiError {

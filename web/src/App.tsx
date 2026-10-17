@@ -1,148 +1,115 @@
 import { useState, useEffect, useCallback } from "react";
-import { Header } from "./components/Header";
-import { ResourceInventory } from "./components/ResourceInventory";
-import { ResourceInspector } from "./components/ResourceInspector";
-import { ChangeProposalForm } from "./components/ChangeProposalForm";
-import { ImpactResultView } from "./components/ImpactResultView";
-import type {
-  ChangeType,
-  ImpactAnswer,
-  ImpactRequest,
-  ResourceItem,
-} from "./types";
-import {
-  analyzeImpact,
-  DEFAULT_WORKSPACE_ID,
-  fetchCSRFToken,
-  listResources,
-} from "./api/client";
+import { Sidebar } from "./components/Sidebar";
+import type { NavPage } from "./components/Sidebar";
+import { TopBar } from "./components/TopBar";
+import { InvestigatePage } from "./components/InvestigatePage";
+import { ResourcesPage } from "./components/ResourcesPage";
+import { DependenciesPage } from "./components/DependenciesPage";
+import { SystemHealthPage } from "./components/SystemHealthPage";
+import { fetchCSRFToken, listClusters, DEFAULT_WORKSPACE_ID } from "./api/client";
+import type { ResourceItem, ListClustersResponse } from "./types";
+import { parseProviderID } from "./utils/resource";
+
+// Page-level breadcrumb config
+const BREADCRUMBS: Record<NavPage, string[]> = {
+  investigate:  ["Investigate", "Impact Analysis"],
+  resources:    ["Resources", "Inventory"],
+  dependencies: ["Dependencies", "Topology"],
+  health:       ["System Health", "Telemetry"],
+};
 
 export default function App() {
+  const [activePage, setActivePage] = useState<NavPage>("investigate");
   const [workspaceId, setWorkspaceId] = useState<string>(DEFAULT_WORKSPACE_ID);
-  const [resources, setResources] = useState<ResourceItem[]>([]);
-  const [selectedResource, setSelectedResource] = useState<ResourceItem | null>(null);
-  const [loadingResources, setLoadingResources] = useState<boolean>(true);
-  const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [clusterId, setClusterId] = useState<string>(""); // Default: "All clusters"
+  const [clustersData, setClustersData] = useState<ListClustersResponse | null>(null);
+  const [investigateTarget, setInvestigateTarget] = useState<ResourceItem | null>(null);
 
-  const [impactAnswer, setImpactAnswer] = useState<ImpactAnswer | null>(null);
-  const [analyzing, setAnalyzing] = useState<boolean>(false);
-  const [impactError, setImpactError] = useState<string | null>(null);
-
-  // Initialize CSRF token
+  // Bootstrap CSRF token once on mount
   useEffect(() => {
     fetchCSRFToken();
   }, []);
 
-  const loadResources = useCallback(async (wsId: string) => {
-    setLoadingResources(true);
-    setResourcesError(null);
+  // Discover available clusters dynamically for the selected workspace
+  const refreshClusters = useCallback(async () => {
     try {
-      const data = await listResources(wsId);
-      setResources(data.resources);
-      if (data.resources.length > 0 && !selectedResource) {
-        setSelectedResource(data.resources[0]);
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to load resources";
-      setResourcesError(message);
-      setResources([]);
-    } finally {
-      setLoadingResources(false);
+      const res = await listClusters(workspaceId);
+      setClustersData(res);
+    } catch (e) {
+      console.warn("Could not discover clusters for workspace", e);
     }
-  }, [selectedResource]);
+  }, [workspaceId]);
 
   useEffect(() => {
-    loadResources(workspaceId);
-  }, [workspaceId, loadResources]);
+    refreshClusters();
+  }, [refreshClusters]);
 
-  const handleAnalyze = async (
-    changeType: ChangeType,
-    direction: "incoming" | "outgoing",
-    maxDepth: number,
-    details: string
-  ) => {
-    if (!selectedResource) return;
-
-    setAnalyzing(true);
-    setImpactError(null);
-    try {
-      const req: ImpactRequest = {
-        target: {
-          provider: selectedResource.provider,
-          resource_type: selectedResource.resource_type,
-          provider_id: selectedResource.provider_id,
-        },
-        direction,
-        max_depth: maxDepth,
-        workspace_id: workspaceId,
-        proposed_change: {
-          change_type: changeType,
-          details: details.trim() || undefined,
-        },
-      };
-
-      const res = await analyzeImpact(req);
-      setImpactAnswer(res);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Impact analysis failed";
-      setImpactError(message);
-      setImpactAnswer(null);
-    } finally {
-      setAnalyzing(false);
-    }
+  const handleNavigateToInvestigate = (res: ResourceItem) => {
+    setInvestigateTarget(res);
+    setActivePage("investigate");
   };
 
+  const breadcrumb = BREADCRUMBS[activePage];
+
   return (
-    <div className="app-container">
-      <Header
+    <div className="shell">
+      {/* ── Left sidebar ── */}
+      <Sidebar
+        activePage={activePage}
+        onNavigate={setActivePage}
         workspaceId={workspaceId}
+        clusterId={clusterId}
+        clustersData={clustersData}
         onWorkspaceChange={(ws) => {
           setWorkspaceId(ws);
-          setSelectedResource(null);
-          setImpactAnswer(null);
+          setInvestigateTarget(null);
         }}
-        onSyncComplete={() => loadResources(workspaceId)}
+        onClusterChange={(cl) => {
+          setClusterId(cl);
+          if (investigateTarget) {
+            const parsed = parseProviderID(investigateTarget.provider_id);
+            if (cl && cl !== "all" && parsed.cluster && parsed.cluster !== cl) {
+              setInvestigateTarget(null);
+            }
+          }
+        }}
+        onRefreshClusters={refreshClusters}
+        userName="aaradhy"
       />
 
-      <main className="workflow-grid">
-        {/* Left Column: Resource Inventory */}
-        <section aria-label="Resource Inventory">
-          <ResourceInventory
-            resources={resources}
-            selectedResource={selectedResource}
-            onSelectResource={(res) => {
-              setSelectedResource(res);
-              setImpactAnswer(null);
-              setImpactError(null);
-            }}
-            loading={loadingResources}
-            error={resourcesError}
-            onRefresh={() => loadResources(workspaceId)}
-          />
-        </section>
+      {/* ── Main area ── */}
+      <div className="main-area">
+        <TopBar breadcrumb={breadcrumb} />
 
-        {/* Right Column: Workflow Steps (Inspector, Change Proposal, Impact Results) */}
-        <section aria-label="Impact Workflow" style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-          {selectedResource && (
-            <ResourceInspector
+        <main className="page-content">
+          {activePage === "investigate" && (
+            <InvestigatePage
               workspaceId={workspaceId}
-              resource={selectedResource}
+              clusterId={clusterId}
+              initialResource={investigateTarget}
             />
           )}
-
-          <ChangeProposalForm
-            selectedResource={selectedResource}
-            onAnalyze={handleAnalyze}
-            analyzing={analyzing}
-          />
-
-          <ImpactResultView
-            answer={impactAnswer}
-            error={impactError}
-            loading={analyzing}
-          />
-        </section>
-      </main>
+          {activePage === "resources" && (
+            <ResourcesPage
+              workspaceId={workspaceId}
+              clusterId={clusterId}
+              clustersData={clustersData}
+              onRefreshClusters={refreshClusters}
+              onNavigateToInvestigate={handleNavigateToInvestigate}
+            />
+          )}
+          {activePage === "dependencies" && (
+            <DependenciesPage
+              workspaceId={workspaceId}
+              clusterId={clusterId}
+              onNavigateToInvestigate={handleNavigateToInvestigate}
+            />
+          )}
+          {activePage === "health" && (
+            <SystemHealthPage workspaceId={workspaceId} />
+          )}
+        </main>
+      </div>
     </div>
   );
 }
