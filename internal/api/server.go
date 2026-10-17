@@ -85,9 +85,12 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("GET /api/csrf-token", s.csrfManager.TokenHandler())
 	s.mux.Handle("GET /api/v1/csrf", s.csrfManager.TokenHandler())
 
-	// 3. Resource inventory and detail endpoints
+	// 3. Resource inventory, detail, and dependency endpoints
 	s.mux.Handle("GET /api/v1/resources", s.handleListResources())
 	s.mux.Handle("GET /api/v1/resources/detail", s.handleResourceDetail())
+	s.mux.Handle("GET /api/v1/dependencies", s.handleListDependencies())
+	s.mux.Handle("GET /api/v1/clusters", s.handleListClusters())
+	s.mux.Handle("GET /api/v1/system/health", s.handleSystemHealth())
 
 	// 4. Manual discovery sync endpoint
 	s.mux.Handle("POST /api/v1/discovery/sync", s.handleDiscoverySync())

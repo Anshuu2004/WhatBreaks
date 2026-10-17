@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -70,7 +71,12 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer, te
 	}
 
 	logger := logging.NewStandardLogger(stderr, logging.LevelInfo)
-	logger.Info("Initializing WhatBreaks Platform", "version", version)
+	if *k8sClusterID == "k8s-cluster" || *k8sClusterID == "" {
+		if detected := detectKubeContext(); detected != "" {
+			*k8sClusterID = detected
+		}
+	}
+	logger.Info("Initializing WhatBreaks Platform", "version", version, "cluster_id", *k8sClusterID)
 
 	if getenv == nil {
 		getenv = os.Getenv
@@ -159,6 +165,12 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer, te
 			pgStore = state.NewPostgresStore(db)
 			apiCfg.Store = pgStore
 			apiCfg.Database = db
+			apiCfg.HealthPinger = db
+			apiCfg.DatabaseInfo = map[string]any{
+				"host":     dbCfg.Host,
+				"port":     dbCfg.Port,
+				"database": dbCfg.Database,
+			}
 			platformOpts = append(platformOpts, platform.WithDatabase(db))
 			logger.Info("Connected to PostgreSQL state database", "host", dbCfg.Host, "db", dbCfg.Database, "user", dbCfg.User)
 		} else {
@@ -186,6 +198,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer, te
 				answer.WithLogger(logger),
 				answer.WithAuthorizer(apiCfg.WorkspaceAuthorizer, nil),
 			)
+			apiCfg.CoreChecker = func(ctx context.Context) error {
+				_, err := client.CheckLiveness(ctx)
+				return err
+			}
 			logger.Info("Connected to Rust Core Engine", "address", *coreAddr)
 
 			if pgStore != nil {
@@ -308,4 +324,26 @@ func printUsage(fs *flag.FlagSet, out io.Writer) {
 	fmt.Fprintln(out, "Options:")
 	fs.SetOutput(out)
 	fs.PrintDefaults()
+}
+
+func detectKubeContext() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	kcPath := filepath.Join(home, ".kube", "config")
+	content, err := os.ReadFile(kcPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "current-context:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+			}
+		}
+	}
+	return ""
 }

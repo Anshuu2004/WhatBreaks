@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"strconv"
@@ -52,6 +53,7 @@ type Config struct {
 	HealthPinger          health.DBPinger
 	SessionCookie         auth.CookieConfig
 	CsrfCookieName        string
+	DatabaseInfo          map[string]any
 	RateLimitWindow       time.Duration
 	RateLimitMax          int
 	SpeedLimitWindow      time.Duration
@@ -64,6 +66,7 @@ type Config struct {
 	Coordinator           discovery.Coordinator
 	ConfiguredWorkspaceID string
 	WorkspaceAuthorizer   *auth.WorkspaceAuthorizer
+	CoreChecker           func(ctx context.Context) error
 }
 
 // DefaultConfig returns an API Config populated with default settings.

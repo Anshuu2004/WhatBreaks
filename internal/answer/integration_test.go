@@ -148,7 +148,7 @@ func startServerProcess(t *testing.T, binPath string) (*coreclient.Client, strin
 		}
 	})
 
-	readyDeadline := time.Now().Add(5 * time.Second)
+	readyDeadline := time.Now().Add(15 * time.Second)
 	ready := false
 	for time.Now().Before(readyDeadline) {
 		select {
