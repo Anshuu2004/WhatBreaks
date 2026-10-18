@@ -82,7 +82,7 @@ Compiled static assets are generated in `web/dist/`.
 WhatBreaks includes test suites across Go, Rust, and TypeScript.
 
 ### Method 1: The Unified Test Runner (Recommended)
-Use [`scripts/test.sh`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/scripts/test.sh) to run the full verification pipeline:
+Use [`scripts/test.sh`](../scripts/test.sh) to run the full verification pipeline:
 
 ```bash
 ./scripts/test.sh
@@ -139,7 +139,7 @@ git diff --check
 
 ## 5. Optional Real Kubernetes Acceptance Tests
 
-WhatBreaks includes end-to-end acceptance tests that run against real Kubernetes clusters ([`test/acceptance/k8s_e2e_test.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/test/acceptance/k8s_e2e_test.go)).
+WhatBreaks includes end-to-end acceptance tests that run against real Kubernetes clusters ([`test/acceptance/k8s_e2e_test.go`](../test/acceptance/k8s_e2e_test.go)).
 
 > [!CAUTION]
 > **Safety Guard**:
@@ -165,7 +165,7 @@ WhatBreaks includes end-to-end acceptance tests that run against real Kubernetes
 
 ## 6. Protobuf Code Generation
 
-The gRPC contract between Go and Rust is defined in [`proto/wb/core/v1/core.proto`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/proto/wb/core/v1/core.proto).
+The gRPC contract between Go and Rust is defined in [`proto/wb/core/v1/core.proto`](../proto/wb/core/v1/core.proto).
 
 ### Regenerating Go Code
 If you modify `core.proto`, regenerate the Go bindings:

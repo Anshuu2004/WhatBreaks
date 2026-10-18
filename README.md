@@ -90,7 +90,7 @@ Before running WhatBreaks, verify you have the following installed:
 - **netcat (`nc`)**: Preinstalled on macOS / Linux
 
 ### Clone & Start the Full Stack
-WhatBreaks provides an idempotent stack runner at [`scripts/wb.sh`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/scripts/wb.sh):
+WhatBreaks provides an idempotent stack runner at [`scripts/wb.sh`](scripts/wb.sh):
 
 ```bash
 # 1. Clone repository
@@ -312,7 +312,7 @@ Contributions, bug reports, and pull requests are welcome:
 4. Open a GitHub Pull Request with a clear explanation of changes.
 
 ### License
-The WhatBreaks Core Engine crates (`core-engine`, `core-engine-server`, `core-engine-proto`) are licensed under the **GNU Affero General Public License v3.0 or later** ([`AGPL-3.0-or-later`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/core-engine/Cargo.toml#L6)). WhatBreaks V1 is free to use for Kubernetes.
+The WhatBreaks Core Engine crates (`core-engine`, `core-engine-server`, `core-engine-proto`) are licensed under the **GNU Affero General Public License v3.0 or later** ([`AGPL-3.0-or-later`](core-engine/Cargo.toml#L7)). WhatBreaks V1 is free to use for Kubernetes.
 
 ---
 

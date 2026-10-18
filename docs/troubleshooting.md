@@ -175,7 +175,7 @@ curl -s "http://127.0.0.1:8080/api/v1/system/diagnose?workspace_id=00000000-0000
    kubectl config use-context <valid-cluster-context>
    ```
 3. If permissions are missing (HTTP 403 on `/api/v1/pods`):
-   Apply the read-only ClusterRole from [`docs/kubernetes-setup.md`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/docs/kubernetes-setup.md#2-required-kubernetes-permissions-strictly-read-only).
+   Apply the read-only ClusterRole from [`docs/kubernetes-setup.md`](kubernetes-setup.md#2-required-kubernetes-permissions-strictly-read-only).
 
 ---
 
