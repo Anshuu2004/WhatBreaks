@@ -6,6 +6,7 @@ import {
   Activity,
   ChevronRight,
 } from "lucide-react";
+import { NavIcon } from "./NavIcon";
 
 export type NavPage = "investigate" | "resources" | "dependencies" | "health";
 
@@ -62,7 +63,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <nav className="sidebar" aria-label="Application navigation">
       {/* Logo */}
       <div className="sidebar-logo">
-        <div className="sidebar-logo-mark">WB</div>
+        <div className="sidebar-logo-mark" aria-hidden="true">
+          <NavIcon size={18} />
+        </div>
         <div className="sidebar-logo-text">
           <span className="sidebar-logo-name">WhatBreaks</span>
           <span className="sidebar-logo-sub">Infrastructure Impact Analysis</span>

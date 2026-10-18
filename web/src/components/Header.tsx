@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { RefreshCw, Shield, Layers, CheckCircle2, AlertTriangle } from "lucide-react";
+import { RefreshCw, Shield, CheckCircle2, AlertTriangle } from "lucide-react";
+import { NavIcon } from "./NavIcon";
 import type { DiscoverySyncResponse } from "../types";
 import { syncDiscovery } from "../api/client";
 
@@ -39,8 +40,8 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="top-bar">
       <div className="brand-section">
-        <div className="brand-logo">
-          <Layers size={22} />
+        <div className="brand-logo" aria-hidden="true">
+          <NavIcon size={22} />
         </div>
         <div className="brand-titles">
           <h1>

@@ -82,11 +82,11 @@ flowchart LR
 *(To add live browser screenshots, capture the views from `http://localhost:3000` and save them under `docs/images/`):*
 
 > **1. Investigate Page (Blast Radius)**: Capture a proposed `DELETE` change on a Service showing impacted callers and propagation path $\rightarrow$ save to `docs/images/screenshot-investigate.png`.
-> 
+>
 > **2. Resources Inventory**: Capture the inventory table with type and cluster filters active $\rightarrow$ save to `docs/images/screenshot-resources.png`.
-> 
+>
 > **3. Dependency Topology**: Capture the multi-node interactive graph $\rightarrow$ save to `docs/images/screenshot-dependencies.png`.
-> 
+>
 > **4. System Health & Diagnostics**: Capture the live component telemetry and automated probe results table $\rightarrow$ save to `docs/images/screenshot-health.png`.
 
 ---
