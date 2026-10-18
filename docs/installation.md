@@ -61,7 +61,7 @@ Before starting services, ensure the following local TCP ports are free:
 
 ## 4. Quick Start via Stack Manager Script (Recommended)
 
-WhatBreaks provides an automated stack manager script at [`scripts/wb.sh`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/scripts/wb.sh). It manages the entire local developer stack with process tracking, safety invariants, and automatic health checks.
+WhatBreaks provides an automated stack manager script at [`scripts/wb.sh`](../scripts/wb.sh). It manages the entire local developer stack with process tracking, safety invariants, and automatic health checks.
 
 ### Start the Stack
 ```bash

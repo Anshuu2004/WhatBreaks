@@ -58,7 +58,7 @@ sanitized[i] = SecretMetadata{
 | **Private Keys (PEM)** | **DISCARDED AT UNMARSHALING** | `-----BEGIN RSA PRIVATE KEY-----` | **NEVER** |
 
 ### C. Test Verification
-This invariant is enforced by automated security tests in [`internal/collector/k8s/secret_safety_test.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/collector/k8s/secret_safety_test.go):
+This invariant is enforced by automated security tests in [`internal/collector/k8s/secret_safety_test.go`](../internal/collector/k8s/secret_safety_test.go):
 - The test returns synthetic Kubernetes secrets containing passwords, RSA private keys, and service account JWTs.
 - The test asserts that the resulting Evidence and database payloads do **not** contain any secret strings:
   ```go
@@ -71,7 +71,7 @@ This invariant is enforced by automated security tests in [`internal/collector/k
 
 ## 3. Strictly Read-Only Kubernetes Interface
 
-The Go Kubernetes client interface ([`internal/collector/k8s/client.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/collector/k8s/client.go)) provides an immutable, read-only contract:
+The Go Kubernetes client interface ([`internal/collector/k8s/client.go`](../internal/collector/k8s/client.go)) provides an immutable, read-only contract:
 
 ```go
 type Client interface {

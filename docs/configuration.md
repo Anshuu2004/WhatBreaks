@@ -87,7 +87,7 @@ The Go Platform API binary (`wb`) accepts the following flags:
 
 ## 4. Forbidden Environment Variables
 
-To protect against credential leakage and environment pollution, WhatBreaks enforces strict **startup rejection invariants** in [`cmd/wb/main.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/cmd/wb/main.go#L85-L94) and [`internal/config/config.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/config/config.go#L11-L27):
+To protect against credential leakage and environment pollution, WhatBreaks enforces strict **startup rejection invariants** in [`cmd/wb/main.go`](../cmd/wb/main.go#L85-L94) and [`internal/config/config.go`](../internal/config/config.go#L11-L27):
 
 ```go
 if getenv("WB_API_TOKEN") != "" || getenv("TT_API_TOKEN") != "" {

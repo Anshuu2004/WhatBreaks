@@ -9,7 +9,7 @@ This guide explains how to connect WhatBreaks to your Kubernetes cluster safely,
 ## 1. Architectural Model & Connection Behavior
 
 ### How WhatBreaks Connects to Kubernetes
-Unlike tools that embed heavy client libraries or silently switch clusters behind the scenes, the WhatBreaks Kubernetes Collector is a **pure HTTP/HTTPS REST client** implemented in Go standard library ([`internal/collector/k8s/client.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/collector/k8s/client.go)).
+Unlike tools that embed heavy client libraries or silently switch clusters behind the scenes, the WhatBreaks Kubernetes Collector is a **pure HTTP/HTTPS REST client** implemented in Go standard library ([`internal/collector/k8s/client.go`](../internal/collector/k8s/client.go)).
 
 ### Connection Modes
 1. **Local Development (via Proxy)**: Connects to `http://127.0.0.1:8001`, which is served by an authenticated local `kubectl proxy --port=8001`. This is the default workflow used by `scripts/wb.sh`.
@@ -103,7 +103,7 @@ subjects:
 A common concern with Kubernetes inventory tools is access to `Secret` resources. WhatBreaks enforces a strict architectural guarantee: **Zero Secret Custody**.
 
 ### How Secrets are Handled
-In [`internal/collector/k8s/client.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/collector/k8s/client.go#L419-L460):
+In [`internal/collector/k8s/client.go`](../internal/collector/k8s/client.go#L419-L460):
 1. The collector executes a `GET` request against `/api/v1/namespaces/{ns}/secrets`.
 2. When decoding the response JSON, it strictly unmarshals the secret metadata (`name`, `namespace`, `uid`) and maps the keys of the `data` field into an array of string key names:
    ```go
@@ -117,13 +117,13 @@ In [`internal/collector/k8s/client.go`](file:///Users/aaradhychinche/Documents/W
 5. Workload references (such as Pod environment variables referencing `SecretKeySelector`) capture only the reference name (`secret_name: "db-secret"`, `key: "password"`), proving the dependency exists without inspecting the secret payload.
 
 > [!NOTE]
-> This invariant is tested in unit test [`internal/collector/k8s/secret_safety_test.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/collector/k8s/secret_safety_test.go), verifying that raw tokens, private keys, and passwords never appear in evidence buffers.
+> This invariant is tested in unit test [`internal/collector/k8s/secret_safety_test.go`](../internal/collector/k8s/secret_safety_test.go), verifying that raw tokens, private keys, and passwords never appear in evidence buffers.
 
 ---
 
 ## 4. Resource Scope Policy (Required vs. Optional)
 
-WhatBreaks categorizes Kubernetes resource scopes according to the policy in [`internal/collector/k8s/scopes.go`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/internal/collector/k8s/scopes.go):
+WhatBreaks categorizes Kubernetes resource scopes according to the policy in [`internal/collector/k8s/scopes.go`](../internal/collector/k8s/scopes.go):
 
 | Scope | Resource Type | Requirement Level | Impact if Permission Missing |
 | :--- | :--- | :--- | :--- |

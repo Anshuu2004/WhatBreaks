@@ -89,7 +89,7 @@ flowchart TD
 
 Communication between the Go control plane and the Rust Core Engine occurs over a local gRPC channel (`wb.core.v1`) on port `50051`.
 
-The contract is formally defined in [`proto/wb/core/v1/core.proto`](file:///Users/aaradhychinche/Documents/WB/whatbreaks/proto/wb/core/v1/core.proto):
+The contract is formally defined in [`proto/wb/core/v1/core.proto`](../proto/wb/core/v1/core.proto):
 
 1. **`DiscoveryService`**:
    - `RunDiscovery(RunDiscoveryRequest) returns (RunDiscoveryResponse)`: Takes a batch of point-in-time `Evidence` records and applies registered discovery rules (Ownership, Resource Reference, Runtime Connection) to yield candidate relationships and diagnostics.
