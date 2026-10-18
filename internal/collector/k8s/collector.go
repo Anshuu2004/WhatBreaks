@@ -228,7 +228,32 @@ func (c *Collector) Ping(ctx context.Context) error {
 	return err
 }
 
+// Client returns the underlying read-only Kubernetes Client.
+func (c *Collector) Client() Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client
+}
+
+// Restart safely resets state and restarts observation collection.
+func (c *Collector) Restart(ctx context.Context) error {
+	c.mu.Lock()
+	if c.cancelWatch != nil {
+		c.cancelWatch()
+		c.cancelWatch = nil
+	}
+	c.running = false
+	c.stopped = false
+	c.ready = false
+	c.alive = false
+	c.stopCh = make(chan struct{})
+	c.mu.Unlock()
+
+	return c.Start(ctx)
+}
+
 // ---------------------------------------------------------------------------
+
 // Core Collection Sweep (Read-Only)
 // ---------------------------------------------------------------------------
 

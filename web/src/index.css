@@ -1096,3 +1096,46 @@ body {
     height: 200px;
   }
 }
+
+/* ── Diagnostic Slide-Out Drawer ──────────────────────── */
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(2px);
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.drawer-panel {
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  width: 640px;
+  max-width: calc(100vw - 40px);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.6);
+  animation: slideInRight 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

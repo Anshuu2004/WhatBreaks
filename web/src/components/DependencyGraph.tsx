@@ -38,13 +38,15 @@ export {
 export type { ImpactVisualStatus, GraphNode, GraphEdge };
 
 interface DependencyGraphProps {
-  answer: ImpactAnswer;
+  answer?: ImpactAnswer | null;
+  target?: ResourceIdentity | null;
   allRelationships?: DependencyRelationship[];
   onSelectNode?: (id: ResourceIdentity) => void;
 }
 
 export const DependencyGraph: React.FC<DependencyGraphProps> = ({
   answer,
+  target,
   allRelationships,
   onSelectNode,
 }) => {
@@ -59,10 +61,18 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [showTable, setShowTable] = useState(false);
 
-  const { nodes, edges, width, height } = useMemo(
-    () => buildGraph(answer, allRelationships),
-    [answer, allRelationships]
+  const effectiveTarget = target || answer?.target || null;
+  const isImpactMode = Boolean(
+    answer &&
+      (!effectiveTarget || resourceKey(answer.target) === resourceKey(effectiveTarget))
   );
+
+  const { nodes, edges, width, height } = useMemo(() => {
+    if (!effectiveTarget && !answer) {
+      return { nodes: [], edges: [], width: 540, height: 260 };
+    }
+    return buildGraph(effectiveTarget || answer!, allRelationships, answer);
+  }, [effectiveTarget, allRelationships, answer]);
 
   // Auto-fit to view
   const fitToView = useCallback(() => {
@@ -152,7 +162,23 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
       {/* ── Graph Header & Controls ── */}
       <div className="graph-header">
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span className="graph-header-label">Impact Blast Radius Topology</span>
+          <span className="graph-header-label">
+            {isImpactMode ? "Impact Blast Radius Topology" : "Resource Topology & Relationships"}
+          </span>
+          <span
+            className="risk-badge low"
+            style={{
+              fontSize: 9,
+              padding: "1px 6px",
+              background: isImpactMode ? "rgba(214,90,90,0.15)" : "rgba(255,255,255,0.08)",
+              color: isImpactMode ? "var(--status-error)" : "var(--text-secondary)",
+              border: isImpactMode ? "1px solid var(--status-error)" : "1px solid var(--border)",
+            }}
+          >
+            {isImpactMode
+              ? `SIMULATION: ${answer?.change_assessment?.change_type || "IMPACT"}`
+              : "EXPLORATION MODE"}
+          </span>
           <span
             style={{
               fontSize: 11,
@@ -223,7 +249,7 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
                 <th>Type</th>
                 <th>Namespace</th>
                 <th>Cluster</th>
-                <th>Impact Status</th>
+                <th>{isImpactMode ? "Impact Status" : "Topology Status"}</th>
                 <th>Distance</th>
               </tr>
             </thead>
@@ -278,6 +304,7 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
                         style={{
                           background: "rgba(255,255,255,0.08)",
                           color: "var(--text-primary)",
+                          border: "1px solid var(--text-primary)",
                         }}
                       >
                         TARGET
@@ -296,6 +323,17 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
                         }}
                       >
                         NOT IMPACTED
+                      </span>
+                    ) : n.status === "connected" ? (
+                      <span
+                        className="risk-badge low"
+                        style={{
+                          background: "rgba(255,255,255,0.05)",
+                          color: "var(--text-secondary)",
+                          border: "1px solid var(--border)",
+                        }}
+                      >
+                        CONNECTED
                       </span>
                     ) : (
                       <span
@@ -450,6 +488,8 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
                   ? "var(--status-error)"
                   : node.status === "non_impacted"
                   ? "var(--status-ok)"
+                  : node.status === "connected"
+                  ? "var(--border-strong)"
                   : "var(--text-dim)";
 
                 const borderWidth = isSelected || node.status === "target" ? 2 : 1.5;
@@ -461,6 +501,8 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
                     ? "var(--status-err-bg)"
                     : node.status === "non_impacted"
                     ? "var(--status-ok-bg)"
+                    : node.status === "connected"
+                    ? "rgba(255, 255, 255, 0.05)"
                     : "rgba(255, 255, 255, 0.04)";
 
                 const badgeTextFill =
@@ -470,16 +512,20 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
                     ? "var(--status-error)"
                     : node.status === "non_impacted"
                     ? "var(--status-ok)"
+                    : node.status === "connected"
+                    ? "var(--text-secondary)"
                     : "var(--text-dim)";
 
                 const tooltipStatus =
                   node.status === "target"
-                    ? "TARGET (Subject of proposed change)"
+                    ? "TARGET (Selected resource)"
+                    : node.status === "connected"
+                    ? "CONNECTED (Topological neighbor — impact not simulated)"
                     : node.status === "impacted"
                     ? "IMPACTED (Identified as potentially broken by backend analysis)"
                     : node.status === "non_impacted"
-                    ? "CONNECTED (Not identified as impacted by complete analysis)"
-                    : "UNKNOWN (Impact status inconclusive due to partial analysis)";
+                    ? "NOT IMPACTED (Not identified as impacted by complete analysis)"
+                    : "INCONCLUSIVE (Status inconclusive due to partial analysis)";
 
                 return (
                   <g
@@ -592,7 +638,7 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
       >
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
           <span style={{ color: "var(--text-dim)", textTransform: "uppercase", fontSize: 10 }}>
-            Visual States:
+            {isImpactMode ? "Simulation States:" : "Topology States:"}
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <span
@@ -607,45 +653,63 @@ export const DependencyGraph: React.FC<DependencyGraphProps> = ({
             />
             Target
           </span>
-          <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <span
-              style={{
-                width: 10,
-                height: 10,
-                border: "1.5px solid var(--status-error)",
-                background: "rgba(214,90,90,0.15)",
-                display: "inline-block",
-                borderRadius: 2,
-              }}
-            />
-            <strong style={{ color: "var(--status-error)" }}>Potentially Impacted</strong>
-          </span>
-          <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <span
-              style={{
-                width: 10,
-                height: 10,
-                border: "1.5px solid var(--status-ok)",
-                background: "rgba(85,200,120,0.15)",
-                display: "inline-block",
-                borderRadius: 2,
-              }}
-            />
-            <span style={{ color: "var(--status-ok)" }}>Not identified as impacted</span>
-          </span>
-          <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <span
-              style={{
-                width: 10,
-                height: 10,
-                border: "1px solid var(--text-dim)",
-                background: "var(--bg-elevated)",
-                display: "inline-block",
-                borderRadius: 2,
-              }}
-            />
-            <span style={{ color: "var(--text-dim)" }}>Status Inconclusive</span>
-          </span>
+          {isImpactMode ? (
+            <>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    border: "1.5px solid var(--status-error)",
+                    background: "rgba(214,90,90,0.15)",
+                    display: "inline-block",
+                    borderRadius: 2,
+                  }}
+                />
+                <strong style={{ color: "var(--status-error)" }}>Potentially Impacted</strong>
+              </span>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    border: "1.5px solid var(--status-ok)",
+                    background: "rgba(85,200,120,0.15)",
+                    display: "inline-block",
+                    borderRadius: 2,
+                  }}
+                />
+                <span style={{ color: "var(--status-ok)" }}>Not identified as impacted</span>
+              </span>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    border: "1px solid var(--text-dim)",
+                    background: "var(--bg-elevated)",
+                    display: "inline-block",
+                    borderRadius: 2,
+                  }}
+                />
+                <span style={{ color: "var(--text-dim)" }}>Status Inconclusive</span>
+              </span>
+            </>
+          ) : (
+            <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  border: "1.5px solid var(--border-strong)",
+                  background: "var(--bg-elevated)",
+                  display: "inline-block",
+                  borderRadius: 2,
+                }}
+              />
+              <span style={{ color: "var(--text-secondary)" }}>Connected Dependency (Neutral)</span>
+            </span>
+          )}
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>

@@ -205,3 +205,65 @@ export interface ApiError {
   error: string;
   code: string;
 }
+
+export type RecoveryStatus =
+  | "not_started"
+  | "diagnosing"
+  | "fix_available"
+  | "fixing"
+  | "recovered"
+  | "failed";
+
+export interface DiagnosticStep {
+  name: string;
+  status: "ok" | "warn" | "failed" | "skipped";
+  message: string;
+  duration_ms: number;
+  details?: Record<string, any>;
+}
+
+export interface DiagnosticAnalysis {
+  probable_cause: string;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  category: string;
+  supporting_evidence: string[];
+  recommended_action: string;
+  fix_type: string;
+  fix_available: boolean;
+  mutating: boolean;
+  potential_effects?: string;
+}
+
+export interface ComponentDiagnosticResult {
+  component: string;
+  status: string;
+  timestamp: string;
+  current_error?: string;
+  steps: DiagnosticStep[];
+  analysis: DiagnosticAnalysis;
+}
+
+export interface SystemDiagnoseResponse {
+  workspace_id: string;
+  timestamp: string;
+  component?: string;
+  results: Record<string, ComponentDiagnosticResult>;
+}
+
+export interface RecoveryRequest {
+  component: string;
+  action: string;
+  confirmed: boolean;
+}
+
+export interface RecoveryResponse {
+  workspace_id: string;
+  component: string;
+  action: string;
+  status: "recovered" | "failed";
+  verified_healthy: boolean;
+  message: string;
+  duration_ms: number;
+  health?: ComponentHealth;
+  next_steps?: string;
+}

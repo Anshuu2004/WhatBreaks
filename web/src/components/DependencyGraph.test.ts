@@ -294,3 +294,180 @@ test("Priority 4: Empty responses display honest states without fabricating node
   assert.equal(graph.nodes[0].status, "target");
   assert.equal(graph.edges.length, 0, "No edges must be fabricated");
 });
+
+test("Regression: Selecting a resource immediately renders its connected topology in exploration mode without an impact answer", () => {
+  const targetResource = {
+    provider: "kubernetes",
+    resource_type: "deployment",
+    provider_id: "cluster-1/prod/order-service",
+  };
+
+  const allRelationships: DependencyRelationship[] = [
+    // Inbound: Ingress routes to order-service
+    {
+      source: {
+        provider: "kubernetes",
+        resource_type: "ingress",
+        provider_id: "cluster-1/prod/order-ingress",
+      },
+      target: targetResource,
+      kind: "ROUTES_TO",
+      category: "NETWORK",
+      first_observed_at: "2026-10-18T00:00:00Z",
+      last_observed_at: "2026-10-18T00:00:00Z",
+    },
+    // Outbound: order-service depends on database
+    {
+      source: targetResource,
+      target: {
+        provider: "kubernetes",
+        resource_type: "service",
+        provider_id: "cluster-1/prod/postgres-svc",
+      },
+      kind: "DEPENDS_ON",
+      category: "NETWORK",
+      first_observed_at: "2026-10-18T00:00:00Z",
+      last_observed_at: "2026-10-18T00:00:00Z",
+    },
+    // Unrelated relationship elsewhere
+    {
+      source: {
+        provider: "kubernetes",
+        resource_type: "deployment",
+        provider_id: "cluster-1/monitoring/prometheus",
+      },
+      target: {
+        provider: "kubernetes",
+        resource_type: "pod",
+        provider_id: "cluster-1/monitoring/prometheus-0",
+      },
+      kind: "OWNS",
+      category: "LIFECYCLE",
+      first_observed_at: "2026-10-18T00:00:00Z",
+      last_observed_at: "2026-10-18T00:00:00Z",
+    },
+  ];
+
+  // Call buildGraph directly with target ResourceIdentity and no ImpactAnswer
+  const graph = buildGraph(targetResource, allRelationships, null);
+
+  assert.equal(graph.nodes.length, 3, "Must display target + 2 connected neighbors");
+  assert.equal(graph.edges.length, 2, "Must display both connected edges");
+
+  const targetNode = graph.nodes.find((n) => n.isTarget);
+  assert.ok(targetNode, "Target node must be present");
+  assert.equal(targetNode.providerId, "cluster-1/prod/order-service");
+  assert.equal(targetNode.status, "target");
+
+  // Verify connected neighbors are labeled "connected", NOT "impacted" or "non_impacted"
+  const ingressNode = graph.nodes.find((n) => n.providerId === "cluster-1/prod/order-ingress");
+  const dbNode = graph.nodes.find((n) => n.providerId === "cluster-1/prod/postgres-svc");
+
+  assert.ok(ingressNode, "Inbound ingress neighbor must be present");
+  assert.equal(ingressNode.status, "connected", "Connected neighbor must have status 'connected'");
+  assert.equal(ingressNode.isImpacted, false, "Connected neighbor must not be marked impacted");
+
+  assert.ok(dbNode, "Outbound database neighbor must be present");
+  assert.equal(dbNode.status, "connected", "Connected neighbor must have status 'connected'");
+  assert.equal(dbNode.isImpacted, false, "Connected neighbor must not be marked impacted");
+
+  // Unrelated resource must not be leaked
+  const unneededNode = graph.nodes.find((n) => n.providerId === "cluster-1/monitoring/prometheus");
+  assert.equal(unneededNode, undefined, "Unrelated nodes must not appear");
+});
+
+test("Regression: State Invalidation discards stale impact analysis when target does not match", () => {
+  const targetA = {
+    provider: "kubernetes",
+    resource_type: "service",
+    provider_id: "cluster-1/prod/service-a",
+  };
+  const targetB = {
+    provider: "kubernetes",
+    resource_type: "service",
+    provider_id: "cluster-1/prod/service-b",
+  };
+
+  // Stale answer calculated for targetA
+  const staleAnswerA = createMockAnswer({
+    target: targetA,
+    impacted_resources: [
+      {
+        resource: {
+          provider: "kubernetes",
+          resource_type: "deployment",
+          provider_id: "cluster-1/prod/caller-of-a",
+        },
+        depth: 1,
+        impact_type: "DIRECT_DEPENDENCY",
+      },
+    ],
+  });
+
+  const relationships: DependencyRelationship[] = [
+    {
+      source: {
+        provider: "kubernetes",
+        resource_type: "deployment",
+        provider_id: "cluster-1/prod/caller-of-b",
+      },
+      target: targetB,
+      kind: "DEPENDS_ON",
+      category: "NETWORK",
+      first_observed_at: "2026-10-18T00:00:00Z",
+      last_observed_at: "2026-10-18T00:00:00Z",
+    },
+  ];
+
+  // Pass targetB with staleAnswerA (which belongs to targetA)
+  const graph = buildGraph(targetB, relationships, staleAnswerA);
+
+  const targetNode = graph.nodes.find((n) => n.isTarget);
+  assert.equal(targetNode?.providerId, "cluster-1/prod/service-b", "Target must be targetB");
+  assert.equal(targetNode?.status, "target");
+
+  // The stale impacted node caller-of-a MUST NOT be in the graph
+  const staleNode = graph.nodes.find((n) => n.providerId === "cluster-1/prod/caller-of-a");
+  assert.equal(staleNode, undefined, "Stale impact analysis node from targetA must be discarded");
+
+  // caller-of-b must be present as a neutral connected neighbor
+  const neighborB = graph.nodes.find((n) => n.providerId === "cluster-1/prod/caller-of-b");
+  assert.ok(neighborB, "TargetB's true neighbor must be present");
+  assert.equal(neighborB.status, "connected", "TargetB's neighbor must be neutral connected, not impacted");
+});
+
+test("Regression: Selecting another node in graph refocuses topology immediately", () => {
+  const nodeA = {
+    provider: "kubernetes",
+    resource_type: "service",
+    provider_id: "cluster-1/prod/svc-auth",
+  };
+  const nodeB = {
+    provider: "kubernetes",
+    resource_type: "deployment",
+    provider_id: "cluster-1/prod/deploy-api",
+  };
+
+  const relationships: DependencyRelationship[] = [
+    {
+      source: nodeB,
+      target: nodeA,
+      kind: "CALLS",
+      category: "NETWORK",
+      first_observed_at: "2026-10-18T00:00:00Z",
+      last_observed_at: "2026-10-18T00:00:00Z",
+    },
+  ];
+
+  // 1. Initial graph focused on nodeA
+  const graphA = buildGraph(nodeA, relationships, null);
+  assert.equal(graphA.nodes.find((n) => n.isTarget)?.providerId, "cluster-1/prod/svc-auth");
+  assert.equal(graphA.nodes.find((n) => n.providerId === "cluster-1/prod/deploy-api")?.status, "connected");
+
+  // 2. User clicks nodeB, graph refocuses on nodeB
+  const graphB = buildGraph(nodeB, relationships, null);
+  assert.equal(graphB.nodes.find((n) => n.isTarget)?.providerId, "cluster-1/prod/deploy-api");
+  assert.equal(graphB.nodes.find((n) => n.providerId === "cluster-1/prod/svc-auth")?.status, "connected");
+  assert.equal(graphB.edges.length, 1);
+  assert.equal(graphB.edges[0].label, "CALLS");
+});

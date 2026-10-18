@@ -6,6 +6,7 @@ import { InvestigatePage } from "./components/InvestigatePage";
 import { ResourcesPage } from "./components/ResourcesPage";
 import { DependenciesPage } from "./components/DependenciesPage";
 import { SystemHealthPage } from "./components/SystemHealthPage";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { fetchCSRFToken, listClusters, DEFAULT_WORKSPACE_ID } from "./api/client";
 import type { ResourceItem, ListClustersResponse } from "./types";
 import { parseProviderID } from "./utils/resource";
@@ -45,7 +46,7 @@ export default function App() {
   }, [refreshClusters]);
 
   const handleNavigateToInvestigate = (res: ResourceItem) => {
-    setInvestigateTarget(res);
+    setInvestigateTarget({ ...res });
     setActivePage("investigate");
   };
 
@@ -82,32 +83,34 @@ export default function App() {
         <TopBar breadcrumb={breadcrumb} />
 
         <main className="page-content">
-          {activePage === "investigate" && (
-            <InvestigatePage
-              workspaceId={workspaceId}
-              clusterId={clusterId}
-              initialResource={investigateTarget}
-            />
-          )}
-          {activePage === "resources" && (
-            <ResourcesPage
-              workspaceId={workspaceId}
-              clusterId={clusterId}
-              clustersData={clustersData}
-              onRefreshClusters={refreshClusters}
-              onNavigateToInvestigate={handleNavigateToInvestigate}
-            />
-          )}
-          {activePage === "dependencies" && (
-            <DependenciesPage
-              workspaceId={workspaceId}
-              clusterId={clusterId}
-              onNavigateToInvestigate={handleNavigateToInvestigate}
-            />
-          )}
-          {activePage === "health" && (
-            <SystemHealthPage workspaceId={workspaceId} />
-          )}
+          <ErrorBoundary fallbackTitle="Page encounter an unexpected rendering error">
+            {activePage === "investigate" && (
+              <InvestigatePage
+                workspaceId={workspaceId}
+                clusterId={clusterId}
+                initialResource={investigateTarget}
+              />
+            )}
+            {activePage === "resources" && (
+              <ResourcesPage
+                workspaceId={workspaceId}
+                clusterId={clusterId}
+                clustersData={clustersData}
+                onRefreshClusters={refreshClusters}
+                onNavigateToInvestigate={handleNavigateToInvestigate}
+              />
+            )}
+            {activePage === "dependencies" && (
+              <DependenciesPage
+                workspaceId={workspaceId}
+                clusterId={clusterId}
+                onNavigateToInvestigate={handleNavigateToInvestigate}
+              />
+            )}
+            {activePage === "health" && (
+              <SystemHealthPage workspaceId={workspaceId} />
+            )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>

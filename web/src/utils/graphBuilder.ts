@@ -17,7 +17,7 @@ export const PADDING = 36;
 export const ARROW_SIZE = 6;
 export const DRAG_THRESHOLD = 5;
 
-export type ImpactVisualStatus = "target" | "impacted" | "non_impacted" | "inconclusive";
+export type ImpactVisualStatus = "target" | "impacted" | "non_impacted" | "inconclusive" | "connected";
 
 export interface GraphNode {
   id: string;
@@ -69,37 +69,67 @@ export function shouldActivateNode(dragDistance: number): boolean {
 }
 
 /**
- * Builds the full connected topology graph for Investigate:
- * - Target resource (status: "target")
- * - Backend-identified potentially impacted resources (status: "impacted", red)
- * - Relevant connected resources not identified as impacted (status: "non_impacted", green)
- * - If backend analysis was incomplete/partial/inconclusive, connected nodes are marked (status: "inconclusive", gray)
- * - Directed edges with propagation semantics: isPropagating true for DEPENDS_ON/CALLS (solid green),
- *   false for OWNS/RUNS_ON (dashed gray).
+ * Builds the connected topology graph for Investigate:
+ * - Target resource (status: "target", highlighted)
+ * - In Exploration mode (no ImpactAnswer):
+ *   Connected resources are displayed immediately with status: "connected" (neutral, never falsely marked as impacted)
+ * - In Impact Analysis mode (with ImpactAnswer):
+ *   Backend-identified potentially impacted resources (status: "impacted", red)
+ *   Relevant connected resources not identified as impacted (status: "non_impacted", green)
+ *   If analysis was partial/inconclusive, marked as status: "inconclusive" (gray)
+ * - Directed edges with propagation semantics: isPropagating true for DEPENDS_ON/CALLS/ROUTES_TO,
+ *   false for OWNS/RUNS_ON/LIFECYCLE boundaries.
  */
 export function buildGraph(
-  answer: ImpactAnswer,
-  allRelationships?: DependencyRelationship[]
+  targetOrAnswer: ImpactAnswer | ResourceIdentity,
+  allRelationships?: DependencyRelationship[],
+  optionalAnswer?: ImpactAnswer | null
 ): { nodes: GraphNode[]; edges: GraphEdge[]; width: number; height: number } {
-  const nodeMap = new Map<string, GraphNode>();
+  let target: ResourceIdentity;
+  let answer: ImpactAnswer | null = null;
 
-  const impactedMap = new Map<string, { depth: number; type?: string; reason?: string }>();
-  for (const ir of answer.impacted_resources) {
-    impactedMap.set(resourceKey(ir.resource), {
-      depth: ir.depth,
-      type: ir.impact_type,
-      reason: ir.impact_reason,
-    });
+  if (
+    typeof targetOrAnswer === "object" &&
+    targetOrAnswer !== null &&
+    "impacted_resources" in targetOrAnswer &&
+    "target" in targetOrAnswer
+  ) {
+    answer = targetOrAnswer as ImpactAnswer;
+    target = answer.target;
+  } else {
+    target = targetOrAnswer as ResourceIdentity;
+    answer = optionalAnswer ?? null;
   }
 
-  const targetKey = resourceKey(answer.target);
+  // Safety Invalidation: If answer exists but belongs to a different target, invalidate it
+  // to avoid displaying stale impact results on the new selection!
+  if (answer && resourceKey(answer.target) !== resourceKey(target)) {
+    answer = null;
+  }
+
+  const nodeMap = new Map<string, GraphNode>();
+  const impactedMap = new Map<string, { depth: number; type?: string; reason?: string }>();
+
+  if (answer) {
+    for (const ir of answer.impacted_resources) {
+      impactedMap.set(resourceKey(ir.resource), {
+        depth: ir.depth,
+        type: ir.impact_type,
+        reason: ir.impact_reason,
+      });
+    }
+  }
+
+  const targetKey = resourceKey(target);
 
   // Analysis completeness & conclusiveness check
   const isAnalysisConclusive = Boolean(
-    answer.completeness
-      ? answer.completeness.is_complete &&
-        answer.completeness.status === "COMPLETE" &&
-        (!answer.completeness.reasons || answer.completeness.reasons.length === 0)
+    answer
+      ? answer.completeness
+        ? answer.completeness.is_complete &&
+          answer.completeness.status === "COMPLETE" &&
+          (!answer.completeness.reasons || answer.completeness.reasons.length === 0)
+        : true
       : true
   );
 
@@ -111,12 +141,17 @@ export function buildGraph(
     let status: ImpactVisualStatus = "non_impacted";
     if (isTarget) {
       status = "target";
-    } else if (imp) {
-      status = "impacted";
-    } else if (!isAnalysisConclusive) {
-      status = "inconclusive";
+    } else if (answer) {
+      if (imp) {
+        status = "impacted";
+      } else if (!isAnalysisConclusive) {
+        status = "inconclusive";
+      } else {
+        status = "non_impacted";
+      }
     } else {
-      status = "non_impacted";
+      // Exploration mode: no change has been simulated, so connected nodes are neutral connected dependencies
+      status = "connected";
     }
 
     return {
@@ -139,13 +174,15 @@ export function buildGraph(
   };
 
   // 1. Register target node
-  nodeMap.set(targetKey, mkNode(answer.target, true));
+  nodeMap.set(targetKey, mkNode(target, true));
 
-  // 2. Register backend-identified impacted resources
-  for (const ir of answer.impacted_resources) {
-    const k = resourceKey(ir.resource);
-    if (!nodeMap.has(k)) {
-      nodeMap.set(k, mkNode(ir.resource));
+  // 2. Register backend-identified impacted resources if in impact analysis mode
+  if (answer) {
+    for (const ir of answer.impacted_resources) {
+      const k = resourceKey(ir.resource);
+      if (!nodeMap.has(k)) {
+        nodeMap.set(k, mkNode(ir.resource));
+      }
     }
   }
 
@@ -153,8 +190,10 @@ export function buildGraph(
   // Only add resources connected directly to target or any impacted node
   if (allRelationships && allRelationships.length > 0) {
     const focalKeys = new Set<string>([targetKey]);
-    for (const ir of answer.impacted_resources) {
-      focalKeys.add(resourceKey(ir.resource));
+    if (answer) {
+      for (const ir of answer.impacted_resources) {
+        focalKeys.add(resourceKey(ir.resource));
+      }
     }
 
     for (const rel of allRelationships) {
@@ -169,7 +208,7 @@ export function buildGraph(
 
   // 4. Edges from answer.relationships
   const edgeMap = new Map<string, GraphEdge>();
-  if (answer.relationships) {
+  if (answer && answer.relationships) {
     for (const rel of answer.relationships) {
       const sk = resourceKey(rel.relationship.source);
       const tk = resourceKey(rel.relationship.target);

@@ -91,6 +91,8 @@ func (s *Server) setupRoutes() {
 	s.mux.Handle("GET /api/v1/dependencies", s.handleListDependencies())
 	s.mux.Handle("GET /api/v1/clusters", s.handleListClusters())
 	s.mux.Handle("GET /api/v1/system/health", s.handleSystemHealth())
+	s.mux.Handle("GET /api/v1/system/diagnose", s.handleSystemDiagnose())
+	s.mux.Handle("POST /api/v1/system/recover", s.handleSystemRecover())
 
 	// 4. Manual discovery sync endpoint
 	s.mux.Handle("POST /api/v1/discovery/sync", s.handleDiscoverySync())

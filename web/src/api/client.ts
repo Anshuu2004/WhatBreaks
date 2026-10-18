@@ -74,6 +74,41 @@ export async function getSystemHealth(): Promise<import("../types").SystemHealth
   return handleResponse<import("../types").SystemHealthResponse>(res);
 }
 
+export async function getDiagnostics(
+  workspaceId: string = DEFAULT_WORKSPACE_ID,
+  component?: string
+): Promise<import("../types").SystemDiagnoseResponse> {
+  const params = new URLSearchParams({ workspace_id: workspaceId });
+  if (component) params.set("component", component);
+  const res = await fetch(`${API_BASE_URL}/api/v1/system/diagnose?${params.toString()}`, {
+    method: "GET",
+    headers: {
+      "X-Workspace-ID": workspaceId,
+    },
+    credentials: "include",
+  });
+  return handleResponse<import("../types").SystemDiagnoseResponse>(res);
+}
+
+export async function recoverComponent(
+  workspaceId: string = DEFAULT_WORKSPACE_ID,
+  payload: import("../types").RecoveryRequest
+): Promise<import("../types").RecoveryResponse> {
+  const csrfToken = await fetchCSRFToken();
+  const res = await fetch(`${API_BASE_URL}/api/v1/system/recover?workspace_id=${workspaceId}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Workspace-ID": workspaceId,
+      "X-CSRF-Token": csrfToken,
+    },
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<import("../types").RecoveryResponse>(res);
+}
+
+
 export async function listClusters(
   workspaceId: string = DEFAULT_WORKSPACE_ID
 ): Promise<import("../types").ListClustersResponse> {

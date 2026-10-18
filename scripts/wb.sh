@@ -124,12 +124,59 @@ check_prerequisites() {
   if ! command -v nc >/dev/null 2>&1; then
     missing+=("netcat (nc) - required for TCP port checks")
   fi
+  if ! command -v docker >/dev/null 2>&1; then
+    missing+=("Docker (docker) - install Docker Desktop: https://www.docker.com/products/docker-desktop/")
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    missing+=("kubectl (kubectl) - install via: brew install kubectl")
+  fi
+  if ! command -v k3d >/dev/null 2>&1; then
+    missing+=("k3d (k3d) - install via: brew install k3d")
+  fi
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo -e "${C_RED}${C_BOLD}Error: Missing required system tools:${C_RESET}" >&2
     for item in "${missing[@]}"; do
       echo -e "  - ${item}" >&2
     done
+    exit 1
+  fi
+}
+
+# Ensure Docker daemon is responsive (auto-launch on macOS with bounded timeout)
+ensure_docker_daemon() {
+  echo -e "\n${C_BOLD}[1/7] Ensuring Docker Daemon is Responsive...${C_RESET}"
+  if ! command -v docker >/dev/null 2>&1; then
+    echo -e "  ↳ [${C_RED}FAILED${C_RESET}] Docker CLI is not installed." >&2
+    echo -e "\n${C_RED}${C_BOLD}Prerequisite Missing:${C_RESET} Docker is required to run the WhatBreaks local stack." >&2
+    echo -e "  Please install Docker Desktop: https://www.docker.com/products/docker-desktop/" >&2
+    exit 1
+  fi
+
+  if docker info >/dev/null 2>&1; then
+    echo -e "  ↳ [${C_GREEN}READY${C_RESET}] Docker daemon is responsive."
+    return 0
+  fi
+
+  echo -e "  Docker daemon not responding. Attempting to start Docker Desktop..."
+  if [[ "$(uname)" == "Darwin" && -d "/Applications/Docker.app" ]]; then
+    open -a /Applications/Docker.app || open -a Docker || true
+    local docker_wait=0
+    local docker_max=60
+    while ! docker info >/dev/null 2>&1; do
+      if [[ ${docker_wait} -ge ${docker_max} ]]; then
+        echo -e "  ↳ [${C_RED}FAILED${C_RESET}] Timed out waiting for Docker daemon to become responsive (${docker_max}s)." >&2
+        echo -e "\n${C_RED}${C_BOLD}Action Required:${C_RESET} Please ensure Docker Desktop is started and responsive." >&2
+        exit 1
+      fi
+      sleep 2
+      docker_wait=$((docker_wait + 2))
+      printf "    Waiting for Docker socket (%ds/%ds)...\n" "${docker_wait}" "${docker_max}"
+    done
+    echo -e "  ↳ [${C_GREEN}READY${C_RESET}] Docker daemon is responsive."
+  else
+    echo -e "  ↳ [${C_RED}FAILED${C_RESET}] Docker daemon is not running." >&2
+    echo -e "\n${C_RED}${C_BOLD}Action Required:${C_RESET} Please start the Docker service before launching WhatBreaks." >&2
     exit 1
   fi
 }
@@ -303,6 +350,7 @@ stop_managed_process() {
 # ------------------------------------------------------------------------------
 cmd_start() {
   check_prerequisites
+  ensure_docker_daemon
   trap 'cleanup_newly_started; exit 1' ERR INT TERM
 
   echo -e "${C_BOLD}================================================================================${C_RESET}"
@@ -392,30 +440,51 @@ cmd_start() {
     fi
   fi
 
-  # 3. Kubernetes Cluster Context & Proxy (Port 8001)
+  # 3. Kubernetes Cluster Context & Proxy (Port ${K8S_PROXY_PORT:-8001})
+  local proxy_port="${K8S_PROXY_PORT:-8001}"
   echo -e "\n${C_BOLD}[3/6] Inspecting Kubernetes Cluster Context...${C_RESET}"
   local k8s_context=""
   local k8s_connected=false
+
+  # If k3d is available, check if the project's development cluster exists or needs starting
+  if command -v k3d >/dev/null 2>&1; then
+    local cluster_exists
+    cluster_exists="$(k3d cluster list -o json 2>/dev/null | jq -r '.[].name' 2>/dev/null | grep -E '^license-service$' || echo "")"
+    if [[ -z "${cluster_exists}" ]]; then
+      if ! kubectl cluster-info >/dev/null 2>&1; then
+        echo -e "  Creating local k3d development cluster ('license-service')..."
+        k3d cluster create license-service --wait
+      fi
+    else
+      local running_servers
+      running_servers="$(k3d cluster list -o json 2>/dev/null | jq -r '.[] | select(.name=="license-service") | .serversRunning' 2>/dev/null || echo "0")"
+      if [[ "${running_servers}" -eq 0 ]]; then
+        echo -e "  Starting existing k3d development cluster ('license-service')..."
+        k3d cluster start license-service
+      fi
+    fi
+  fi
+
   if command -v kubectl >/dev/null 2>&1; then
     k8s_context="$(kubectl config current-context 2>/dev/null || echo "")"
   fi
 
   if [[ -n "${k8s_context}" ]]; then
     echo -e "  Active kubeconfig context: ${C_CYAN}${k8s_context}${C_RESET}"
-    if is_port_open 8001 && curl -s -f http://127.0.0.1:8001/readyz >/dev/null 2>&1; then
+    if is_port_open "${proxy_port}" && curl -s -f "http://127.0.0.1:${proxy_port}/readyz" >/dev/null 2>&1; then
       local proxy_pid
-      proxy_pid="$(get_port_pid 8001)"
-      echo -e "  ↳ [${C_GREEN}READY${C_RESET}] Kubernetes API proxy active on port 8001${proxy_pid:+ (PID ${proxy_pid})}"
+      proxy_pid="$(get_port_pid "${proxy_port}")"
+      echo -e "  ↳ [${C_GREEN}READY${C_RESET}] Kubernetes API proxy active on port ${proxy_port}${proxy_pid:+ (PID ${proxy_pid})}"
       k8s_connected=true
     else
       if kubectl cluster-info >/dev/null 2>&1; then
-        echo -e "  Starting authenticated local proxy (kubectl proxy --port=8001)..."
-        nohup kubectl proxy --port=8001 </dev/null > "${LOG_PROXY}" 2>&1 &
+        echo -e "  Starting authenticated local proxy (kubectl proxy --port=${proxy_port})..."
+        nohup kubectl proxy --port="${proxy_port}" </dev/null > "${LOG_PROXY}" 2>&1 &
         local proxy_pid=$!
         disown "${proxy_pid}" 2>/dev/null || true
         echo "${proxy_pid}" > "${PID_PROXY}"
         NEWLY_STARTED_PIDS+=("${proxy_pid}")
-        if wait_for_http "http://127.0.0.1:8001/readyz" 10 "Kubernetes API Proxy"; then
+        if wait_for_http "http://127.0.0.1:${proxy_port}/readyz" 10 "Kubernetes API Proxy"; then
           echo -e "  ↳ [${C_GREEN}READY${C_RESET}] Kubernetes API proxy online (PID ${proxy_pid})"
           k8s_connected=true
         else
@@ -468,7 +537,7 @@ cmd_start() {
         --health-port=8081 \
         --core-engine-addr=127.0.0.1:50051 \
         --k8s-cluster-id="${k8s_context:-k8s-cluster}" \
-        --k8s-api-url=http://127.0.0.1:8001 \
+        --k8s-api-url="http://127.0.0.1:${proxy_port}" \
         </dev/null > "${LOG_GO}" 2>&1 &
     local new_go_pid=$!
     disown "${new_go_pid}" 2>/dev/null || true
@@ -576,7 +645,7 @@ cmd_stop() {
 
   stop_managed_process "Frontend Dashboard" "${PID_FRONTEND}" "vite|node" 3000
   stop_managed_process "Go Platform API"   "${PID_GO}"       "wb|cmd/wb"  8080
-  stop_managed_process "Kubernetes Proxy"  "${PID_PROXY}"    "kubectl"    8001
+  stop_managed_process "Kubernetes Proxy"  "${PID_PROXY}"    "kubectl"    "${K8S_PROXY_PORT:-8001}"
   stop_managed_process "Rust Core Engine"  "${PID_ENGINE}"   "wb-core-server" 50051
 
   echo -e "\n${C_BOLD}PostgreSQL (Port 5432):${C_RESET} Preserved (data retained in persistent storage)."

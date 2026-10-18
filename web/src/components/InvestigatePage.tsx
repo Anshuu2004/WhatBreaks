@@ -32,7 +32,7 @@ import type {
 } from "../types";
 import { analyzeImpact, listResources, listDependencies } from "../api/client";
 import { DependencyGraph } from "./DependencyGraph";
-import { parseProviderID } from "../utils/resource";
+import { parseProviderID, resourceKey } from "../utils/resource";
 
 // ── Tab definitions ─────────────────────────────────────────────────────────
 type TabId = "impacted" | "paths" | "evidence" | "assumptions" | "limitations" | "diagnostics";
@@ -258,6 +258,90 @@ const DiagnosticsTab: React.FC<{ diagnostics?: import("../types").DiagnosticItem
   );
 };
 
+// ── Topological Relationships Table (Exploration Mode) ──────────────────────
+const RelationshipsTable: React.FC<{
+  title: string;
+  relationships: DependencyRelationship[];
+  isIncoming: boolean;
+  onSelectResource: (res: ResourceIdentity) => void;
+}> = ({ title, relationships, isIncoming, onSelectResource }) => {
+  if (relationships.length === 0) {
+    return (
+      <div className="empty-state" style={{ padding: "24px 0" }}>
+        <div className="empty-state-title">No {title.toLowerCase()} discovered</div>
+        <div className="empty-state-sub">
+          {isIncoming
+            ? "No other resources are observed depending directly on this resource."
+            : "This resource does not observe any direct outgoing dependencies."}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table className="impact-table">
+        <thead>
+          <tr>
+            <th>Connected Resource</th>
+            <th>Type</th>
+            <th>Namespace</th>
+            <th>Cluster</th>
+            <th>Relationship Kind</th>
+            <th style={{ width: 24 }}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {relationships.map((rel, i) => {
+            const peer = isIncoming ? rel.source : rel.target;
+            const parsed = parseProviderID(peer.provider_id);
+            return (
+              <tr
+                key={i}
+                onClick={() => onSelectResource(peer)}
+                style={{ cursor: "pointer" }}
+                title={`Explore ${peer.provider_id}`}
+              >
+                <td>
+                  <div className="cell-resource">
+                    <Database size={12} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 500 }}>
+                      {parsed.name}
+                    </span>
+                  </div>
+                </td>
+                <td className="type-label">{peer.resource_type}</td>
+                <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-secondary)" }}>
+                  {parsed.namespace || "—"}
+                </td>
+                <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-dim)" }}>
+                  {parsed.cluster || "—"}
+                </td>
+                <td>
+                  <span
+                    className="risk-badge low"
+                    style={{
+                      background: "rgba(255,255,255,0.06)",
+                      color: "var(--text-primary)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                    }}
+                  >
+                    {isIncoming ? `← ${rel.kind}` : `${rel.kind} →`}
+                  </span>
+                </td>
+                <td>
+                  <ChevronRight size={12} style={{ color: "var(--text-dim)" }} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 // ── Main InvestigatePage ──────────────────────────────────────────────────────
 export interface InvestigatePageProps {
   workspaceId: string;
@@ -295,6 +379,19 @@ export const InvestigatePage: React.FC<InvestigatePageProps> = ({
 
   // Tabs
   const [activeTab, setActiveTab] = useState<TabId>("impacted");
+  const [explorationTab, setExplorationTab] = useState<"incoming" | "outgoing">("incoming");
+
+  // Immediate neighborhood computation for exploration
+  const targetKey = selectedResource ? resourceKey(selectedResource) : "";
+  const incomingDependencies = useMemo(() => {
+    if (!targetKey) return [];
+    return dependencies.filter((d) => resourceKey(d.target) === targetKey);
+  }, [dependencies, targetKey]);
+
+  const outgoingDependencies = useMemo(() => {
+    if (!targetKey) return [];
+    return dependencies.filter((d) => resourceKey(d.source) === targetKey);
+  }, [dependencies, targetKey]);
 
   // Sync initialResource if prop updates
   useEffect(() => {
@@ -388,6 +485,13 @@ export const InvestigatePage: React.FC<InvestigatePageProps> = ({
       );
     });
   }, [resources, clusterId, searchText]);
+
+  const handleSelectChangeType = (ct: ChangeType) => {
+    setChangeType(ct);
+    if (answer && answer.change_assessment?.change_type && answer.change_assessment.change_type !== ct) {
+      setAnswer(null); // Invalidate results if user switches to a different proposed change type
+    }
+  };
 
   const handleSelectResource = useCallback((res: ResourceItem) => {
     setSelectedResource(res);
@@ -575,7 +679,7 @@ export const InvestigatePage: React.FC<InvestigatePageProps> = ({
                   key={ct}
                   type="button"
                   className={`change-btn${changeType === ct ? " selected" : ""}`}
-                  onClick={() => setChangeType(ct)}
+                  onClick={() => handleSelectChangeType(ct)}
                   aria-pressed={changeType === ct}
                 >
                   <Icon size={13} />
@@ -642,15 +746,222 @@ export const InvestigatePage: React.FC<InvestigatePageProps> = ({
         </div>
       )}
 
-      {/* ── Initial empty state ── */}
-      {!analyzing && !answer && !analysisError && (
+      {/* ── Initial empty state (when no resource selected) ── */}
+      {!analyzing && !selectedResource && !analysisError && (
         <div className="empty-state" style={{ padding: "40px 0", opacity: 0.7 }}>
           <AlertCircle size={28} style={{ color: "var(--text-dim)" }} />
-          <div className="empty-state-title">Select a resource and click Analyze Impact</div>
+          <div className="empty-state-title">Select a resource to explore relationships and analyze impact</div>
           <div className="empty-state-sub">
             {clusterId && clusterId !== "all"
               ? `Currently scoped to cluster ${clusterId}. Select an infrastructure component above.`
-              : "Select a discovered infrastructure resource above to evaluate potential blast radius."}
+              : "Select a discovered infrastructure resource above to inspect its topology or evaluate potential blast radius."}
+          </div>
+        </div>
+      )}
+
+      {/* ── Resource Exploration Mode (Resource selected, no impact simulation run yet) ── */}
+      {!analyzing && selectedResource && !answer && (
+        <div className="results-section">
+          {/* Header */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+              <div>
+                <div className="page-section-label" style={{ marginBottom: 2 }}>Resource Exploration</div>
+                <div className="results-resource-name">
+                  {parsedTarget?.name || selectedResource.provider_id}
+                </div>
+                <div className="results-resource-meta">
+                  <span>{selectedResource.resource_type}</span>
+                  {parsedTarget?.cluster && (
+                    <>
+                      <span className="results-meta-sep">|</span>
+                      <span>cluster: {parsedTarget.cluster}</span>
+                    </>
+                  )}
+                  {parsedTarget?.namespace && (
+                    <>
+                      <span className="results-meta-sep">|</span>
+                      <span>namespace: {parsedTarget.namespace}</span>
+                    </>
+                  )}
+                  <span className="results-meta-sep">|</span>
+                  <span style={{ color: "var(--text-dim)" }}>{selectedResource.provider_id}</span>
+                </div>
+              </div>
+              <div className="results-status">
+                <span
+                  className="risk-badge low"
+                  style={{
+                    background: "rgba(255,255,255,0.08)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border)",
+                    fontSize: 10,
+                  }}
+                >
+                  EXPLORATION MODE
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Exploration guidance banner */}
+          <div
+            style={{
+              background: "rgba(255, 255, 255, 0.03)",
+              border: "1px solid var(--border)",
+              color: "var(--text-secondary)",
+              padding: "10px 14px",
+              marginBottom: 16,
+              fontSize: 12,
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+            }}
+          >
+            <HelpCircle size={16} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+            <div>
+              <strong>Topology Exploration:</strong> Showing immediate incoming and outgoing relationships for this resource.
+              Connected resources are neutral dependencies and not marked as impacted. To simulate potential blast radius for an operational change, choose a change type above and click <strong>Analyze Impact</strong>.
+            </div>
+          </div>
+
+          {/* Summary Stats for Exploration */}
+          <div className="summary-grid">
+            <div className="summary-stat">
+              <GitBranch size={20} className="summary-stat-icon" />
+              <div className="summary-stat-body">
+                <div className="summary-stat-value">{incomingDependencies.length}</div>
+                <div className="summary-stat-label">Inbound Dependents</div>
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
+                  Resources calling or depending on target
+                </div>
+              </div>
+            </div>
+            <div className="summary-stat">
+              <Database size={20} className="summary-stat-icon" />
+              <div className="summary-stat-body">
+                <div className="summary-stat-value">{outgoingDependencies.length}</div>
+                <div className="summary-stat-label">Outbound Dependencies</div>
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
+                  Direct services and configs consumed
+                </div>
+              </div>
+            </div>
+            <div className="summary-stat">
+              <Database size={20} className="summary-stat-icon" />
+              <div className="summary-stat-body">
+                <div className="summary-stat-value">
+                  {incomingDependencies.length + outgoingDependencies.length}
+                </div>
+                <div className="summary-stat-label">Total Connected Edges</div>
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
+                  Discovered topological linkages
+                </div>
+              </div>
+            </div>
+            <div className="summary-stat">
+              <HelpCircle size={20} className="summary-stat-icon" />
+              <div className="summary-stat-body">
+                <div className="summary-stat-value">Neutral</div>
+                <div className="summary-stat-label">Impact Status</div>
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
+                  Click Analyze Impact to simulate
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Dependency Graph in Exploration Mode */}
+          <DependencyGraph
+            target={selectedResource}
+            answer={null}
+            allRelationships={dependencies}
+            onSelectNode={(nodeId) => {
+              const found = resources.find(
+                (r) =>
+                  r.provider_id === nodeId.provider_id &&
+                  r.resource_type === nodeId.resource_type
+              );
+              handleSelectResource(
+                found || {
+                  provider: nodeId.provider,
+                  resource_type: nodeId.resource_type,
+                  provider_id: nodeId.provider_id,
+                  first_observed_at: "",
+                  last_observed_at: "",
+                }
+              );
+            }}
+          />
+
+          {/* Exploration Relationships Tabs */}
+          <div className="results-tabs">
+            <div className="tab-bar" role="tablist" aria-label="Topological relationships">
+              <button
+                className={`tab-btn${explorationTab === "incoming" ? " active" : ""}`}
+                role="tab"
+                aria-selected={explorationTab === "incoming"}
+                onClick={() => setExplorationTab("incoming")}
+              >
+                Inbound Dependents ({incomingDependencies.length})
+              </button>
+              <button
+                className={`tab-btn${explorationTab === "outgoing" ? " active" : ""}`}
+                role="tab"
+                aria-selected={explorationTab === "outgoing"}
+                onClick={() => setExplorationTab("outgoing")}
+              >
+                Outbound Dependencies ({outgoingDependencies.length})
+              </button>
+            </div>
+
+            <div className="tab-panel" role="tabpanel">
+              {explorationTab === "incoming" ? (
+                <RelationshipsTable
+                  title="Inbound Dependents"
+                  relationships={incomingDependencies}
+                  isIncoming={true}
+                  onSelectResource={(peer) => {
+                    const found = resources.find(
+                      (r) =>
+                        r.provider_id === peer.provider_id &&
+                        r.resource_type === peer.resource_type
+                    );
+                    handleSelectResource(
+                      found || {
+                        provider: peer.provider,
+                        resource_type: peer.resource_type,
+                        provider_id: peer.provider_id,
+                        first_observed_at: "",
+                        last_observed_at: "",
+                      }
+                    );
+                  }}
+                />
+              ) : (
+                <RelationshipsTable
+                  title="Outbound Dependencies"
+                  relationships={outgoingDependencies}
+                  isIncoming={false}
+                  onSelectResource={(peer) => {
+                    const found = resources.find(
+                      (r) =>
+                        r.provider_id === peer.provider_id &&
+                        r.resource_type === peer.resource_type
+                    );
+                    handleSelectResource(
+                      found || {
+                        provider: peer.provider,
+                        resource_type: peer.resource_type,
+                        provider_id: peer.provider_id,
+                        first_observed_at: "",
+                        last_observed_at: "",
+                      }
+                    );
+                  }}
+                />
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -763,18 +1074,24 @@ export const InvestigatePage: React.FC<InvestigatePageProps> = ({
 
           {/* Dependency Graph */}
           <DependencyGraph
+            target={selectedResource || answer.target}
             answer={answer}
             allRelationships={dependencies}
             onSelectNode={(nodeId) => {
-              // Find matching resource from current list if available
               const found = resources.find(
                 (r) =>
                   r.provider_id === nodeId.provider_id &&
                   r.resource_type === nodeId.resource_type
               );
-              if (found) {
-                handleSelectResource(found);
-              }
+              handleSelectResource(
+                found || {
+                  provider: nodeId.provider,
+                  resource_type: nodeId.resource_type,
+                  provider_id: nodeId.provider_id,
+                  first_observed_at: "",
+                  last_observed_at: "",
+                }
+              );
             }}
           />
 
@@ -812,9 +1129,15 @@ export const InvestigatePage: React.FC<InvestigatePageProps> = ({
                         r.provider_id === res.provider_id &&
                         r.resource_type === res.resource_type
                     );
-                    if (found) {
-                      handleSelectResource(found);
-                    }
+                    handleSelectResource(
+                      found || {
+                        provider: res.provider,
+                        resource_type: res.resource_type,
+                        provider_id: res.provider_id,
+                        first_observed_at: "",
+                        last_observed_at: "",
+                      }
+                    );
                   }}
                 />
               )}

@@ -279,11 +279,78 @@ func (c *RESTClient) Ping(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("kubernetes api ping returned status %d", resp.StatusCode)
+
+	if resp.StatusCode == http.StatusOK {
+		return nil
 	}
-	return nil
+
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	bodyStr := string(bodyBytes)
+
+	// Check if only log check failed in readyz (common in containerized k3s/k3d distributions)
+	if strings.Contains(bodyStr, "[-]log failed") && !hasOtherFailures(bodyStr) {
+		fallbackReq, fallbackErr := c.newRequest(ctx, "/readyz?exclude=log")
+		if fallbackErr == nil {
+			fallbackResp, fallbackErr := c.httpClient.Do(fallbackReq)
+			if fallbackErr == nil {
+				defer fallbackResp.Body.Close()
+				if fallbackResp.StatusCode == http.StatusOK {
+					c.logger.Warn("Kubernetes API readyz failed on log subsystem; verified reachable via exclude=log fallback probe")
+					return nil
+				}
+			}
+		}
+	}
+
+	var failedChecks []string
+	for _, line := range strings.Split(bodyStr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[-]") {
+			failedChecks = append(failedChecks, line)
+		}
+	}
+	if len(failedChecks) > 0 {
+		return fmt.Errorf("kubernetes api ping returned status %d: %s", resp.StatusCode, strings.Join(failedChecks, ", "))
+	}
+	return fmt.Errorf("kubernetes api ping returned status %d", resp.StatusCode)
 }
+
+func hasOtherFailures(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[-]") && !strings.HasPrefix(line, "[-]log ") {
+			return true
+		}
+	}
+	return false
+}
+
+// ProbeEndpoint executes a read-only HTTP GET against a relative path on the Kubernetes API.
+// It returns the HTTP status code and response body (truncated to 4KB), never mutating any state.
+func (c *RESTClient) ProbeEndpoint(ctx context.Context, path string) (int, string, error) {
+	req, err := c.newRequest(ctx, path)
+	if err != nil {
+		return 0, "", err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode, string(body), nil
+}
+
+// BaseURL returns the configured base URL for the Kubernetes API server.
+func (c *RESTClient) BaseURL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.baseURL != nil {
+		return c.baseURL.String()
+	}
+	return ""
+}
+
 
 func (c *RESTClient) ListNamespaces(ctx context.Context) ([]Namespace, error) {
 	return getList[Namespace](ctx, c, "/api/v1/namespaces")
