@@ -1,0 +1,239 @@
+# WhatBreaks CI: validation only. No deploy, release, or publish jobs.
+# Mirrors scripts/test.sh. Only the two real-cluster Kubernetes tests that
+# scripts/test.sh also excludes by default are skipped.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH'
+    - when: never
+
+stages:
+  - validate
+  - test
+  - build
+
+default:
+  interruptible: true
+
+variables:
+  # Both compiled-language images are Debian bookworm so Rust binaries built in
+  # rust-test run unchanged inside go-test (same glibc).
+  GO_IMAGE: golang:1.26.3-bookworm      # go.mod: go 1.26.3 (verified active on Docker Hub)
+  RUST_IMAGE: rust:1-bookworm           # workspace has no rust-version pin (verified on Docker Hub)
+  NODE_IMAGE: node:24-bookworm          # lockfile engines: ^20.19.0 || >=22.12.0 (verified on Docker Hub)
+  GOTOOLCHAIN: local
+  GOFLAGS: "-mod=readonly"
+  CGO_ENABLED: "0"
+  GOMODCACHE: "$CI_PROJECT_DIR/.cache/go-mod"
+  GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
+  # Go tests resolve <repo root>/target/debug/... from go.mod; keep target here.
+  CARGO_TARGET_DIR: "$CI_PROJECT_DIR/target"
+  CARGO_TERM_COLOR: always
+
+.go:
+  image: $GO_IMAGE
+  cache:
+    key:
+      prefix: "go-${CI_JOB_NAME_SLUG}"
+      files:
+        - go.mod
+        - go.sum
+    paths:
+      - .cache/go-mod/
+      - .cache/go-build/
+  before_script:
+    - go version
+    - go mod download
+    - go mod verify
+
+git-diff-check:
+  extends: .go
+  stage: validate
+  timeout: 5m
+  script:
+    - git diff --check
+
+go-validate:
+  extends: .go
+  stage: validate
+  timeout: 20m
+  # Set allow_failure: true because existing repo files currently have formatting
+  # differences under gofmt and analyzer warnings under go vet that are not part
+  # of scripts/test.sh. This alerts developers without breaking the pipeline gate.
+  allow_failure: true
+  script:
+    - |
+      # gofmt -l exits 0 even when files are listed; test its output instead.
+      # Restrict to tracked files so .cache/ is never scanned.
+      unformatted="$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
+      if [ -n "$unformatted" ]; then
+        echo "gofmt: files not formatted:"
+        echo "$unformatted"
+        exit 1
+      fi
+    - go vet ./...
+
+rust-format:
+  image: $RUST_IMAGE
+  stage: validate
+  timeout: 10m
+  # Set allow_failure: true because existing workspace Rust files currently have
+  # formatting differences under cargo fmt that are not part of scripts/test.sh.
+  allow_failure: true
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+
+rust-test:
+  image: $RUST_IMAGE
+  stage: test
+  timeout: 45m
+  cache:
+    key:
+      prefix: cargo-registry
+      files:
+        - Cargo.lock
+    paths:
+      - .cache/cargo/registry/
+      - .cache/cargo/git/
+  before_script:
+    # core-engine-proto/build.rs uses tonic-build, which needs protoc on PATH.
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+    - rustc --version && cargo --version && protoc --version
+  script:
+    - cargo check --workspace --locked
+    - cargo test --workspace --locked
+    # Fixtures consumed by Go integration tests. Built fresh each run; never cached.
+    - cargo build --workspace --locked --bins --examples
+    - test -x target/debug/wb-core-server
+    - test -x target/debug/examples/fixture_server
+  artifacts:
+    expire_in: 1 day
+    paths:
+      - target/debug/wb-core-server
+      - target/debug/examples/fixture_server
+
+go-test:
+  extends: .go
+  stage: test
+  timeout: 45m
+  needs:
+    - job: rust-test
+      artifacts: true
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    # Disposable CI-only credentials mirroring docker-compose.yml. Not secrets.
+    POSTGRES_USER: whatbreaks
+    POSTGRES_PASSWORD: testsecret
+    POSTGRES_DB: whatbreaks
+    # Read by getTestDatabaseConfig() in the Go test files.
+    # internal/database hard-codes port 5432, so the service must listen there.
+    TEST_DB_HOST: postgres
+    TEST_DB_PORT: "5432"
+    TEST_DB_USER: whatbreaks
+    TEST_DB_PASSWORD: testsecret
+    TEST_DB_NAME: whatbreaks
+  script:
+    - apt-get update && apt-get install -y --no-install-recommends postgresql-client jq
+    - |
+      for bin in target/debug/wb-core-server target/debug/examples/fixture_server; do
+        if [ ! -f "$bin" ]; then
+          echo "missing Rust fixture artifact: $bin"
+          exit 1
+        fi
+        chmod +x "$bin"
+      done
+    - |
+      # Wait for an authenticated query to succeed, not merely an open TCP port.
+      for attempt in $(seq 1 30); do
+        if PGPASSWORD="$TEST_DB_PASSWORD" PGCONNECT_TIMEOUT=2 \
+           psql -X -w -h "$TEST_DB_HOST" -p "$TEST_DB_PORT" -U "$TEST_DB_USER" -d "$TEST_DB_NAME" \
+                -Atqc 'SELECT 1' >/dev/null 2>&1; then
+          echo "PostgreSQL ready after ${attempt} attempt(s)"
+          break
+        fi
+        if [ "$attempt" -eq 30 ]; then
+          echo "PostgreSQL did not become ready with the test credentials"
+          exit 1
+        fi
+        sleep 2
+      done
+    - |
+      set -o pipefail
+      # -p 1: test packages share one database and reuse workspace IDs; serialize them.
+      # -skip: only the two real-cluster tests that scripts/test.sh excludes by default.
+      go test -json -count=1 -p 1 -timeout 30m \
+        -skip '^Test(Kubernetes_RealEndToEndFlow|RealKubernetes_ReconciliationLifecycle)$' \
+        ./... | tee go-test.json
+    - |
+      # Each required test must: (a) emit pass for the exact package+test,
+      # (b) emit no skip for that exact package+test, and
+      # (c) its package must emit a package-level pass (event with no Test field).
+      # Exact matching means a same-named test in another package, a skipped
+      # test, or a failing package cannot satisfy the gate.
+      mod="github.com/aaradhychinche-alt/WhatBreaks"
+      tests=(
+        "internal/database TestIntegration_RealPostgreSQL"
+        "internal/state TestPostgresStore_Integration"
+        "internal/collector/k8s TestCollector_CoreEngineIntegration"
+        "test/acceptance TestProductWorkflow_EndToEnd"
+      )
+      for entry in "${tests[@]}"; do
+        read -r pkg name <<< "$entry"
+        jq -e -s --arg pkg "$mod/$pkg" --arg name "$name" '
+          (any(.[]; .Package == $pkg and .Test == $name and .Action == "pass"))
+          and ((any(.[]; .Package == $pkg and .Test == $name and .Action == "skip")) | not)
+          and (any(.[]; .Package == $pkg and .Test == null and .Action == "pass"))
+        ' go-test.json >/dev/null \
+          || { echo "required integration test gate failed: $pkg $name"; exit 1; }
+      done
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - go-test.json
+
+web-checks:
+  image: $NODE_IMAGE
+  stage: test
+  timeout: 20m
+  dependencies: []
+  cache:
+    key:
+      prefix: npm
+      files:
+        - web/package-lock.json
+    paths:
+      - .cache/npm/
+  before_script:
+    - node --version && npm --version
+    - cd web
+    - npm ci --cache "$CI_PROJECT_DIR/.cache/npm" --prefer-offline --no-audit --no-fund
+  script:
+    - npm run lint     # oxlint
+    - npm test         # node --test on two .test.ts files
+    - npm run build    # tsc -b && vite build -> web/dist/
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - web/dist/
+
+go-build:
+  extends: .go
+  stage: build
+  timeout: 20m
+  dependencies: []
+  script:
+    - go build -trimpath -o bin/wb ./cmd/wb
+    - ./bin/wb --version   # covered by cmd/wb/main_test.go TestMain_VersionFlag
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - bin/wb
