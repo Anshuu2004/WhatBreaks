@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/banner.png" alt="WhatBreaks - See the impact before it happens" width="100%">
+</p>
+
 # WhatBreaks (WB)
 
 > **"Know what could break before you change your infrastructure."**
@@ -6,6 +10,7 @@ WhatBreaks is a deterministic change-impact analysis and topology exploration en
 
 - **Website**: [https://www.whatbreaks.dev/](https://www.whatbreaks.dev/)
 - **GitHub Repository**: [https://github.com/aaradhychinche-alt/WhatBreaks](https://github.com/aaradhychinche-alt/WhatBreaks)
+- **License**: [MIT](LICENSE)
 - **Status**: **WhatBreaks V1 is free to use for Kubernetes.**
 
 ---
@@ -312,7 +317,7 @@ Contributions, bug reports, and pull requests are welcome:
 4. Open a GitHub Pull Request with a clear explanation of changes.
 
 ### License
-The WhatBreaks Core Engine crates (`core-engine`, `core-engine-server`, `core-engine-proto`) are licensed under the **GNU Affero General Public License v3.0 or later** ([`AGPL-3.0-or-later`](core-engine/Cargo.toml#L7)). WhatBreaks V1 is free to use for Kubernetes.
+WhatBreaks is open-source software licensed under the [MIT License](LICENSE). Copyright &copy; 2026 Aaradhy Chinche. See the [LICENSE](LICENSE) file for the full license text.
 
 ---
 
