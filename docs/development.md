@@ -186,6 +186,8 @@ cargo build -p wb-core-proto
 
 ## 7. Contribution Workflow
 
+For comprehensive guidelines on proposing features, finding `good first issue` tasks, bug reporting standards, and pull request expectations, see the root [Contribution Guide](../CONTRIBUTING.md) and [Code of Conduct](../CODE_OF_CONDUCT.md).
+
 1. **Fork & Branch**: Create a feature branch from `main`:
    ```bash
    git checkout -b feature/my-new-feature
@@ -195,4 +197,4 @@ cargo build -p wb-core-proto
    ```bash
    ./scripts/test.sh
    ```
-4. **Submit PR**: Open a pull request against `aaradhychinche-alt/WhatBreaks` describing the problem solved and test coverage.
+4. **Submit PR**: Open a pull request describing the problem solved, testing performed, and referencing any relevant issue.

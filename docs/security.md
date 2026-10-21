@@ -167,3 +167,9 @@ To maintain technical accuracy, the following boundaries of the V1 security mode
 - **Local / Single-Node Deployment**: WhatBreaks V1 is designed for local development and private internal platform deployment. It does not include built-in public multi-tenant user authentication (SSO / OIDC).
 - **Communication Encryption**: Communication between the Go Platform API and the Rust Core Engine on `127.0.0.1:50051` is unencrypted plaintext gRPC intended for local loopback or sidecar networks. In cross-host environments, an mTLS proxy (e.g. Envoy or Linkerd) is recommended.
 - **Certifications**: WhatBreaks does not claim compliance certifications (e.g. SOC2, FedRAMP, HIPAA, ISO 27001) in V1.
+
+---
+
+## 8. Vulnerability Reporting
+
+If you discover a potential security vulnerability, please do not open a public issue. Refer to our [Security Policy](../SECURITY.md) for instructions on confidential disclosure.

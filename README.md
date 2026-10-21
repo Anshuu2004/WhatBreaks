@@ -262,7 +262,7 @@ For in-depth root-cause analysis and remediation steps, see [Troubleshooting Gui
 - **Identity Disambiguation**: Canonical resource identities prevent cross-cluster spoofing.
 - **API Security Middleware**: Enforces double-submit CSRF cookie validation, rate limiting, 10MB payload limit, CORS restrictions, and security headers.
 
-For the complete threat model and security boundaries, see [Security Model](docs/security.md).
+For the complete threat model and security boundaries, see [Security Model](docs/security.md) and our [Security Policy](SECURITY.md) for responsible vulnerability disclosure.
 
 ---
 
@@ -310,8 +310,8 @@ For developer environment setup, protobuf regeneration, and code standards, see 
 - CI/CD pre-merge pull request impact analysis bot.
 
 ### Contributing
-Contributions, bug reports, and pull requests are welcome:
-1. Review the [Developer Guide](docs/development.md).
+Contributions, bug reports, and pull requests are welcome. Please read our [Contribution Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting changes:
+1. Review the [Contribution Guide](CONTRIBUTING.md) and [Developer Guide](docs/development.md).
 2. Create a feature branch from `main`.
 3. Verify all tests pass with `./scripts/test.sh`.
 4. Open a GitHub Pull Request with a clear explanation of changes.
@@ -334,3 +334,6 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 - [Security & Safety Model](docs/security.md)
 - [Developer & Testing Guide](docs/development.md)
 - [REST & Probe API Specification](docs/api.md)
+- [Contribution Guidelines](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
