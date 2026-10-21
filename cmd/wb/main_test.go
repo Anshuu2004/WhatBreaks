@@ -55,6 +55,20 @@ func TestMain_HelpFlag(t *testing.T) {
 	}
 }
 
+func TestMain_HelpCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"wb", "help"}, nil, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "Usage: wb") {
+		t.Errorf("expected usage output, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "help              Show help message") {
+		t.Errorf("expected help command documented in usage output, got: %s", stdout.String())
+	}
+}
+
 func TestMain_ForbiddenEnv(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	env := map[string]string{
