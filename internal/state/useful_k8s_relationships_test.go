@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	corev1 "github.com/aaradhychinche-alt/WhatBreaks/gen/go/wb/core/v1"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/collector/k8s"
 	"github.com/aaradhychinche-alt/WhatBreaks/internal/logging"
@@ -44,9 +46,9 @@ func newReferenceEvidence(id, sourceProvider, sourceResType, sourceProviderID, r
 	}
 	if target != nil {
 		if strings.EqualFold(target.Provider, "kubernetes") {
-			targetCopy := *target
+			targetCopy := proto.Clone(target).(*corev1.ResourceIdentity)
 			targetCopy.ProviderId = qualifyK8s(targetCopy.ProviderId, targetCopy.ResourceType)
-			dataMap["target"] = &targetCopy
+			dataMap["target"] = targetCopy
 		} else {
 			dataMap["target"] = target
 		}
@@ -82,9 +84,9 @@ func newOwnershipEvidence(id, childProvider, childResType, childProviderID strin
 	}
 	if owner != nil {
 		if strings.EqualFold(owner.Provider, "kubernetes") {
-			ownerCopy := *owner
+			ownerCopy := proto.Clone(owner).(*corev1.ResourceIdentity)
 			ownerCopy.ProviderId = qualifyK8s(ownerCopy.ProviderId, ownerCopy.ResourceType)
-			dataMap["owner"] = &ownerCopy
+			dataMap["owner"] = ownerCopy
 		} else {
 			dataMap["owner"] = owner
 		}
