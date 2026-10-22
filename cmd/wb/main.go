@@ -36,11 +36,6 @@ func main() {
 }
 
 func run(args []string, getenv func(string) string, stdout, stderr io.Writer, testCtx context.Context) int {
-	if len(args) > 1 && args[1] == "version" {
-		fmt.Fprintf(stdout, "WhatBreaks Platform %s\n", version)
-		return 0
-	}
-
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -55,6 +50,17 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer, te
 	k8sClusterID := fs.String("k8s-cluster-id", "k8s-cluster", "Kubernetes cluster identifier")
 	k8sClusterWide := fs.Bool("k8s-cluster-wide", false, "Enable cluster-wide Kubernetes collection")
 	k8sNamespaces := fs.String("k8s-namespaces", "", "Comma-separated list of namespaces to observe")
+
+	if len(args) > 1 {
+		switch args[1] {
+		case "help":
+			printUsage(fs, stdout)
+			return 0
+		case "version":
+			fmt.Fprintf(stdout, "WhatBreaks Platform %s\n", version)
+			return 0
+		}
+	}
 
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
@@ -319,6 +325,7 @@ func printUsage(fs *flag.FlagSet, out io.Writer) {
 	fmt.Fprintln(out, "Usage: wb [options] [command]")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Commands:")
+	fmt.Fprintln(out, "  help              Show help message")
 	fmt.Fprintln(out, "  version           Print WhatBreaks version")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Options:")
