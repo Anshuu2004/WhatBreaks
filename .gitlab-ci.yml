@@ -58,13 +58,18 @@ git-diff-check:
   script:
     - git diff --check
 
-go-validate:
+go-lint:
   extends: .go
   stage: validate
-  timeout: 20m
-  # Set allow_failure: true because existing repo files currently have formatting
-  # differences under gofmt and analyzer warnings under go vet that are not part
-  # of scripts/test.sh. This alerts developers without breaking the pipeline gate.
+  timeout: 10m
+  script:
+    - go vet ./cmd/... ./gen/... ./internal/...
+
+go-format:
+  extends: .go
+  stage: validate
+  timeout: 10m
+  # Advisory check matching rust-format: alerts developers of gofmt differences without blocking the pipeline gate.
   allow_failure: true
   script:
     - |
@@ -76,7 +81,6 @@ go-validate:
         echo "$unformatted"
         exit 1
       fi
-    - go vet ./...
 
 rust-format:
   image: $RUST_IMAGE
@@ -172,6 +176,9 @@ go-test:
       go test -json -count=1 -p 1 -timeout 30m \
         -skip '^Test(Kubernetes_RealEndToEndFlow|RealKubernetes_ReconciliationLifecycle)$' \
         ./... | tee go-test.json
+    - |
+      # Concurrency race detector on critical packages (matches scripts/test.sh & docs/development.md).
+      CGO_ENABLED=1 go test -race -count=1 ./internal/api ./internal/answer ./internal/state
     - |
       # Each required test must: (a) emit pass for the exact package+test,
       # (b) emit no skip for that exact package+test, and
