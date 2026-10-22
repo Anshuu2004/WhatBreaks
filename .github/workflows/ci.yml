@@ -1,0 +1,300 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Git diff whitespace check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.event.after }}"
+            if [ -n "$BEFORE" ] && ! echo "$BEFORE" | grep -qE '^0+$'; then
+              git diff --check "$BEFORE" "$AFTER"
+            else
+              # Initial branch push (all-zero 'before'): compare against merge base with default branch, or empty tree if root/orphan
+              DEFAULT_BRANCH="${{ github.event.repository.default_branch || 'main' }}"
+              BASE="$(git merge-base HEAD "origin/${DEFAULT_BRANCH}" 2>/dev/null || true)"
+              if [ -z "$BASE" ]; then
+                BASE="$(git hash-object -t tree /dev/null)"
+              fi
+              git diff --check "$BASE" HEAD
+            fi
+          else
+            git diff --check
+          fi
+
+      - name: Go vet (production and internal packages)
+        run: go vet ./cmd/... ./gen/... ./internal/...
+
+      - name: Go format check (gofmt)
+        continue-on-error: true
+        run: |
+          unformatted="$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt: files not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  rust:
+    name: Rust Workspace Tests & Fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Rust format check (cargo fmt)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Cargo check
+        run: cargo check --workspace --locked
+
+      - name: Cargo test
+        run: cargo test --workspace --locked
+
+      - name: Build Rust server binaries and test fixtures
+        run: |
+          cargo build --workspace --locked --bins --examples
+          test -x target/debug/wb-core-server
+          test -x target/debug/examples/fixture_server
+
+      - name: Upload Rust fixture artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-fixtures
+          path: |
+            target/debug/wb-core-server
+            target/debug/examples/fixture_server
+          retention-days: 1
+
+  web:
+    name: Web Frontend Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd web
+          npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Frontend linter (oxlint)
+        run: |
+          cd web
+          npm run lint
+
+      - name: Frontend unit tests
+        run: |
+          cd web
+          npm test
+
+      - name: Frontend production build
+        run: |
+          cd web
+          npm run build
+
+      - name: Upload web distribution bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 7
+
+  go:
+    name: Go Tests & Build
+    runs-on: ubuntu-latest
+    needs: [rust]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: whatbreaks
+          POSTGRES_PASSWORD: testsecret
+          POSTGRES_DB: whatbreaks
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_USER: whatbreaks
+      POSTGRES_PASSWORD: testsecret
+      POSTGRES_DB: whatbreaks
+      TEST_DB_HOST: localhost
+      TEST_DB_PORT: "5432"
+      TEST_DB_USER: whatbreaks
+      TEST_DB_PASSWORD: testsecret
+      TEST_DB_NAME: whatbreaks
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install postgresql-client and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client jq
+
+      - name: Download Rust fixture artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-fixtures
+          path: target/debug
+
+      - name: Verify and place Rust fixture binaries
+        run: |
+          mkdir -p target/debug/examples
+          if [ -f "target/debug/target/debug/wb-core-server" ]; then
+            mv target/debug/target/debug/wb-core-server target/debug/
+          fi
+          if [ -f "target/debug/target/debug/examples/fixture_server" ]; then
+            mv target/debug/target/debug/examples/fixture_server target/debug/examples/
+          fi
+          if [ -f "wb-core-server" ]; then
+            mv wb-core-server target/debug/
+          fi
+          if [ -f "fixture_server" ]; then
+            mv fixture_server target/debug/examples/
+          elif [ -f "examples/fixture_server" ]; then
+            mv examples/fixture_server target/debug/examples/
+          fi
+          chmod +x target/debug/wb-core-server target/debug/examples/fixture_server
+          test -x target/debug/wb-core-server
+          test -x target/debug/examples/fixture_server
+
+      - name: Wait for PostgreSQL readiness
+        run: |
+          for attempt in $(seq 1 30); do
+            if PGPASSWORD="$TEST_DB_PASSWORD" PGCONNECT_TIMEOUT=2 \
+               psql -X -w -h "$TEST_DB_HOST" -p "$TEST_DB_PORT" -U "$TEST_DB_USER" -d "$TEST_DB_NAME" \
+                    -Atqc 'SELECT 1' >/dev/null 2>&1; then
+              echo "PostgreSQL ready after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "PostgreSQL did not become ready with the test credentials"
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Run Go unit and integration tests
+        run: |
+          set -o pipefail
+          go test -json -count=1 -p 1 -timeout 30m \
+            -skip '^Test(Kubernetes_RealEndToEndFlow|RealKubernetes_ReconciliationLifecycle)$' \
+            ./... | tee go-test.json
+
+      - name: Run Go concurrency race detector
+        run: |
+          CGO_ENABLED=1 go test -race -count=1 ./internal/api ./internal/answer ./internal/state
+
+      - name: Verify required integration tests passed
+        run: |
+          mod="github.com/aaradhychinche-alt/WhatBreaks"
+          tests=(
+            "internal/database TestIntegration_RealPostgreSQL"
+            "internal/state TestPostgresStore_Integration"
+            "internal/collector/k8s TestCollector_CoreEngineIntegration"
+            "test/acceptance TestProductWorkflow_EndToEnd"
+          )
+          for entry in "${tests[@]}"; do
+            read -r pkg name <<< "$entry"
+            jq -e -s --arg pkg "$mod/$pkg" --arg name "$name" '
+              (any(.[]; .Package? == $pkg and .Test? == $name and .Action? == "pass"))
+              and ((any(.[]; .Package? == $pkg and .Test? == $name and .Action? == "skip")) | not)
+              and (any(.[]; .Package? == $pkg and .Test? == null and .Action? == "pass"))
+            ' go-test.json >/dev/null \
+              || { echo "required integration test gate failed: $pkg $name"; exit 1; }
+          done
+
+      - name: Build Go CLI binary
+        run: |
+          go build -trimpath -o bin/wb ./cmd/wb
+          ./bin/wb --version
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-test-results
+          path: go-test.json
+          retention-days: 7
+
+      - name: Upload Go binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb-cli
+          path: bin/wb
+          retention-days: 7
