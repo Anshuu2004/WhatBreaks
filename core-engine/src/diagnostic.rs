@@ -42,9 +42,9 @@ pub mod diagnostic_code {
 
 /// Severity level of a diagnostic finding.
 ///
-/// `Ord` is derived, so the variant declaration order (`Info < Warning < Error`)
-/// is part of the sorting contract. Append new variants deliberately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Ordered by an explicit [`rank`](Self::rank) (`Info < Warning < Error`), so
+/// reordering or inserting variants can't silently change how diagnostics sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DiagnosticSeverity {
     Info,
@@ -62,6 +62,29 @@ impl DiagnosticSeverity {
     }
 }
 
+impl DiagnosticSeverity {
+    /// Sort rank used by `Ord`; lower sorts first.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Info => 0,
+            Self::Warning => 1,
+            Self::Error => 2,
+        }
+    }
+}
+
+impl PartialOrd for DiagnosticSeverity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DiagnosticSeverity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
 impl fmt::Display for DiagnosticSeverity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -74,9 +97,9 @@ impl fmt::Display for DiagnosticSeverity {
 
 /// Scope of relevance for a diagnostic in relation to an analysis query.
 ///
-/// `Ord` is derived, so the variant declaration order
-/// (`Target < BlastRadius < Workspace`) is part of the sorting contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Ordered by an explicit [`rank`](Self::rank) (`Target < BlastRadius < Workspace`),
+/// independent of the variant declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DiagnosticRelevance {
     /// Directly affects the resource being analyzed.
@@ -97,6 +120,29 @@ impl DiagnosticRelevance {
     }
 }
 
+impl DiagnosticRelevance {
+    /// Sort rank used by `Ord`; lower sorts first.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Target => 0,
+            Self::BlastRadius => 1,
+            Self::Workspace => 2,
+        }
+    }
+}
+
+impl PartialOrd for DiagnosticRelevance {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DiagnosticRelevance {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
 impl fmt::Display for DiagnosticRelevance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -109,9 +155,9 @@ impl fmt::Display for DiagnosticRelevance {
 
 /// High-level completeness classification of an impact analysis result.
 ///
-/// `Ord` is derived, so the variant declaration order
-/// (`Complete < Partial < Degraded`) is part of the sorting contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Ordered by an explicit [`rank`](Self::rank) (`Complete < Partial < Degraded`),
+/// independent of the variant declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CompletenessStatus {
     /// Analysis has complete observation coverage for the target and blast radius.
@@ -129,6 +175,29 @@ impl CompletenessStatus {
             Self::Partial => "PARTIAL",
             Self::Degraded => "DEGRADED",
         }
+    }
+}
+
+impl CompletenessStatus {
+    /// Sort rank used by `Ord`; lower sorts first.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Complete => 0,
+            Self::Partial => 1,
+            Self::Degraded => 2,
+        }
+    }
+}
+
+impl PartialOrd for CompletenessStatus {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CompletenessStatus {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
     }
 }
 
@@ -447,17 +516,50 @@ mod tests {
     }
 
     #[test]
-    fn derived_ordering_follows_declaration_order() {
-        // Ord is derived, so reordering the variants would silently change how
-        // diagnostics sort. Pin the current order.
+    fn ordering_follows_explicit_rank() {
         assert!(DiagnosticSeverity::Info < DiagnosticSeverity::Warning);
         assert!(DiagnosticSeverity::Warning < DiagnosticSeverity::Error);
-
         assert!(DiagnosticRelevance::Target < DiagnosticRelevance::BlastRadius);
         assert!(DiagnosticRelevance::BlastRadius < DiagnosticRelevance::Workspace);
-
         assert!(CompletenessStatus::Complete < CompletenessStatus::Partial);
         assert!(CompletenessStatus::Partial < CompletenessStatus::Degraded);
+
+        let mut severities = [
+            DiagnosticSeverity::Error,
+            DiagnosticSeverity::Info,
+            DiagnosticSeverity::Warning,
+        ];
+        severities.sort();
+        assert_eq!(
+            severities.iter().map(|s| s.rank()).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn rank_is_unique_per_variant() {
+        let severity = [
+            DiagnosticSeverity::Info,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::Error,
+        ]
+        .map(|v| v.rank());
+        let relevance = [
+            DiagnosticRelevance::Target,
+            DiagnosticRelevance::BlastRadius,
+            DiagnosticRelevance::Workspace,
+        ]
+        .map(|v| v.rank());
+        let status = [
+            CompletenessStatus::Complete,
+            CompletenessStatus::Partial,
+            CompletenessStatus::Degraded,
+        ]
+        .map(|v| v.rank());
+        for ranks in [severity, relevance, status] {
+            let unique: std::collections::BTreeSet<_> = ranks.iter().collect();
+            assert_eq!(unique.len(), ranks.len());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -585,6 +687,21 @@ mod tests {
         assert!(d.scope.is_none());
         assert!(d.first_observed_at.is_none());
         assert!(d.last_observed_at.is_none());
+    }
+
+    #[test]
+    fn diagnostic_ignores_unknown_fields_from_newer_producers() {
+        let json = serde_json::json!({
+            "code": "INCOMPLETE_SCOPE",
+            "severity": "WARNING",
+            "message": "pods scope failed",
+            "supporting_evidence_ids": [],
+            "relevance": "WORKSPACE",
+            "completeness_impact": "PARTIAL",
+            "added_in_a_later_version": {"anything": true},
+        });
+        let d: Diagnostic = serde_json::from_value(json).unwrap();
+        assert_eq!(d.code, "INCOMPLETE_SCOPE");
     }
 
     #[test]
