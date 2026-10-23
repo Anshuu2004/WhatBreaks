@@ -41,6 +41,9 @@ pub mod diagnostic_code {
 // ---------------------------------------------------------------------------
 
 /// Severity level of a diagnostic finding.
+///
+/// `Ord` is derived, so the variant declaration order (`Info < Warning < Error`)
+/// is part of the sorting contract. Append new variants deliberately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DiagnosticSeverity {
@@ -70,6 +73,9 @@ impl fmt::Display for DiagnosticSeverity {
 // ---------------------------------------------------------------------------
 
 /// Scope of relevance for a diagnostic in relation to an analysis query.
+///
+/// `Ord` is derived, so the variant declaration order
+/// (`Target < BlastRadius < Workspace`) is part of the sorting contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DiagnosticRelevance {
@@ -102,6 +108,9 @@ impl fmt::Display for DiagnosticRelevance {
 // ---------------------------------------------------------------------------
 
 /// High-level completeness classification of an impact analysis result.
+///
+/// `Ord` is derived, so the variant declaration order
+/// (`Complete < Partial < Degraded`) is part of the sorting contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CompletenessStatus {
@@ -134,7 +143,12 @@ impl fmt::Display for CompletenessStatus {
 // ---------------------------------------------------------------------------
 
 /// Structured completeness metadata detailing whether the blast radius is authoritative.
+///
+/// Deserialization checks the `is_complete` invariant, so JSON like
+/// `{"is_complete": true, "status": "PARTIAL"}` is rejected instead of
+/// producing an inconsistent value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "AnalysisCompletenessWire")]
 pub struct AnalysisCompleteness {
     /// Invariant: `is_complete == (status == CompletenessStatus::Complete)`.
     pub is_complete: bool,
@@ -142,6 +156,29 @@ pub struct AnalysisCompleteness {
     pub status: CompletenessStatus,
     /// Factual reasons explaining any partial or degraded completeness.
     pub reasons: Vec<String>,
+}
+
+/// Unvalidated wire shape of [`AnalysisCompleteness`], checked in `TryFrom`.
+#[derive(Deserialize)]
+struct AnalysisCompletenessWire {
+    is_complete: bool,
+    status: CompletenessStatus,
+    reasons: Vec<String>,
+}
+
+impl TryFrom<AnalysisCompletenessWire> for AnalysisCompleteness {
+    type Error = String;
+
+    fn try_from(wire: AnalysisCompletenessWire) -> Result<Self, Self::Error> {
+        let expected = wire.status == CompletenessStatus::Complete;
+        if wire.is_complete != expected {
+            return Err(format!(
+                "is_complete is {} but status {} requires {}",
+                wire.is_complete, wire.status, expected
+            ));
+        }
+        Ok(Self::new(wire.status, wire.reasons))
+    }
 }
 
 impl AnalysisCompleteness {
@@ -260,6 +297,11 @@ impl Diagnostic {
     }
 
     /// Natural comparison key for deterministic ordering.
+    ///
+    /// This is a partial key: it compares code, message, target provider id and
+    /// referenced resource provider id only. Diagnostics that match on those but
+    /// differ in severity, relevance, completeness impact, endpoint, scope or
+    /// evidence compare equal, so with a stable sort they keep their input order.
     pub fn sort_key(&self) -> (&str, &str, &str, &str) {
         let target_str = match &self.target {
             Some(t) => t.provider_id.as_str(),
@@ -465,6 +507,35 @@ mod tests {
 
         let back: AnalysisCompleteness = serde_json::from_value(json).unwrap();
         assert_eq!(back, c);
+        assert_eq!(
+            back.is_complete,
+            back.status == CompletenessStatus::Complete
+        );
+    }
+
+    #[test]
+    fn analysis_completeness_rejects_json_that_breaks_the_invariant() {
+        for (is_complete, status) in [(true, "PARTIAL"), (true, "DEGRADED"), (false, "COMPLETE")] {
+            let json = serde_json::json!({
+                "is_complete": is_complete,
+                "status": status,
+                "reasons": [],
+            });
+            let err = serde_json::from_value::<AnalysisCompleteness>(json)
+                .expect_err("inconsistent completeness must not deserialize");
+            assert!(err.to_string().contains("is_complete"), "{err}");
+        }
+    }
+
+    #[test]
+    fn analysis_completeness_accepts_consistent_json() {
+        let json = serde_json::json!({
+            "is_complete": true,
+            "status": "COMPLETE",
+            "reasons": [],
+        });
+        let c: AnalysisCompleteness = serde_json::from_value(json).unwrap();
+        assert_eq!(c, AnalysisCompleteness::complete());
     }
 
     #[test]
@@ -494,6 +565,41 @@ mod tests {
         assert_eq!(back, d);
     }
 
+    #[test]
+    fn diagnostic_without_optional_fields_deserializes_with_none() {
+        // A minimal payload, as an older or partial producer might send it:
+        // every Option field is absent rather than null.
+        let json = serde_json::json!({
+            "code": "INCOMPLETE_SCOPE",
+            "severity": "WARNING",
+            "message": "pods scope failed",
+            "supporting_evidence_ids": [],
+            "relevance": "WORKSPACE",
+            "completeness_impact": "PARTIAL",
+        });
+
+        let d: Diagnostic = serde_json::from_value(json).unwrap();
+        assert!(d.target.is_none());
+        assert!(d.referenced_resource.is_none());
+        assert!(d.unresolved_endpoint.is_none());
+        assert!(d.scope.is_none());
+        assert!(d.first_observed_at.is_none());
+        assert!(d.last_observed_at.is_none());
+    }
+
+    #[test]
+    fn diagnostic_missing_a_required_field_is_rejected() {
+        let json = serde_json::json!({
+            "code": "INCOMPLETE_SCOPE",
+            "severity": "WARNING",
+            "message": "pods scope failed",
+            "supporting_evidence_ids": [],
+            "relevance": "WORKSPACE",
+        });
+        let err = serde_json::from_value::<Diagnostic>(json).unwrap_err();
+        assert!(err.to_string().contains("completeness_impact"), "{err}");
+    }
+
     // -----------------------------------------------------------------------
     // Diagnostic constructors
     // -----------------------------------------------------------------------
@@ -516,26 +622,33 @@ mod tests {
 
     #[test]
     fn new_keeps_every_field() {
-        let evidence = vec![EvidenceId::new()];
+        let evidence = vec![EvidenceId::new(), EvidenceId::new()];
         let d = Diagnostic::new(
-            diagnostic_code::INCOMPLETE_SCOPE,
-            DiagnosticSeverity::Warning,
-            "ingresses scope failed",
-            None,
-            None,
-            None,
-            Some("ingresses".to_string()),
+            diagnostic_code::UNRESOLVED_REFERENCE,
+            DiagnosticSeverity::Error,
+            "service points at a missing deployment",
+            Some(k8s_service("payments/api")),
+            Some(k8s_service("payments/worker")),
+            Some("10.0.0.7:9090".to_string()),
+            Some("services".to_string()),
             evidence.clone(),
-            DiagnosticRelevance::Workspace,
-            CompletenessStatus::Partial,
-            None,
+            DiagnosticRelevance::BlastRadius,
+            CompletenessStatus::Degraded,
+            Some("2026-10-01T10:00:00Z".to_string()),
             Some("2026-10-02T10:00:00Z".to_string()),
         );
 
-        assert_eq!(d.code, "INCOMPLETE_SCOPE");
-        assert_eq!(d.message, "ingresses scope failed");
-        assert_eq!(d.scope.as_deref(), Some("ingresses"));
+        assert_eq!(d.code, "UNRESOLVED_REFERENCE");
+        assert_eq!(d.severity, DiagnosticSeverity::Error);
+        assert_eq!(d.message, "service points at a missing deployment");
+        assert_eq!(d.target, Some(k8s_service("payments/api")));
+        assert_eq!(d.referenced_resource, Some(k8s_service("payments/worker")));
+        assert_eq!(d.unresolved_endpoint.as_deref(), Some("10.0.0.7:9090"));
+        assert_eq!(d.scope.as_deref(), Some("services"));
         assert_eq!(d.supporting_evidence_ids, evidence);
+        assert_eq!(d.relevance, DiagnosticRelevance::BlastRadius);
+        assert_eq!(d.completeness_impact, CompletenessStatus::Degraded);
+        assert_eq!(d.first_observed_at.as_deref(), Some("2026-10-01T10:00:00Z"));
         assert_eq!(d.last_observed_at.as_deref(), Some("2026-10-02T10:00:00Z"));
     }
 
@@ -579,6 +692,12 @@ mod tests {
             ),
             diag("UNRESOLVED_REFERENCE", "other", Some("a/api"), None),
         ];
+        // Vary the fields sort_key ignores so the order can't depend on them.
+        let mut expected = expected;
+        expected[0].severity = DiagnosticSeverity::Error;
+        expected[1].relevance = DiagnosticRelevance::Target;
+        expected[2].completeness_impact = CompletenessStatus::Degraded;
+        expected[4].severity = DiagnosticSeverity::Info;
 
         let mut reversed = expected.clone();
         reversed.reverse();
@@ -589,5 +708,35 @@ mod tests {
             input.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
             assert_eq!(input, expected);
         }
+    }
+
+    #[test]
+    fn sort_key_ignores_everything_but_code_message_and_resources() {
+        // Locks in the current contract: sort_key is a partial key.
+        let base = diag(
+            "UNRESOLVED_REFERENCE",
+            "missing",
+            Some("a/api"),
+            Some("a/db"),
+        );
+        let mut other = base.clone();
+        other.severity = DiagnosticSeverity::Error;
+        other.relevance = DiagnosticRelevance::Workspace;
+        other.completeness_impact = CompletenessStatus::Degraded;
+        other.unresolved_endpoint = Some("10.0.0.1:8080".to_string());
+        other.scope = Some("pods".to_string());
+        other.supporting_evidence_ids = vec![EvidenceId::new()];
+
+        assert_ne!(base, other);
+        assert_eq!(base.sort_key(), other.sort_key());
+
+        // Ties keep their input order under the stable sort_by.
+        let mut forward = vec![base.clone(), other.clone()];
+        forward.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        assert_eq!(forward, vec![base.clone(), other.clone()]);
+
+        let mut backward = vec![other.clone(), base.clone()];
+        backward.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        assert_eq!(backward, vec![other, base]);
     }
 }
