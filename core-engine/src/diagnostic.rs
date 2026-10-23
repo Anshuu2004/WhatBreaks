@@ -9,8 +9,8 @@
 //! - **Relevance Partitioning**: Diagnostics distinguish `Target`, `BlastRadius`, and `Workspace` relevance.
 //! - **Determinism**: Diagnostics and reasons are deterministically ordered.
 
-use std::fmt;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::evidence::EvidenceId;
 use crate::resource::ResourceIdentity;
@@ -269,6 +269,325 @@ impl Diagnostic {
             Some(r) => r.provider_id.as_str(),
             None => "",
         };
-        (self.code.as_str(), self.message.as_str(), target_str, ref_str)
+        (
+            self.code.as_str(),
+            self.message.as_str(),
+            target_str,
+            ref_str,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource::{Provider, ResourceKind};
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn k8s_service(id: &str) -> ResourceIdentity {
+        ResourceIdentity::new(
+            Provider::new("kubernetes"),
+            ResourceKind::new("service"),
+            id,
+        )
+    }
+
+    fn diag(
+        code: &str,
+        message: &str,
+        target: Option<&str>,
+        reference: Option<&str>,
+    ) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            DiagnosticSeverity::Warning,
+            message,
+            target.map(k8s_service),
+            reference.map(k8s_service),
+            None,
+            None,
+            Vec::new(),
+            DiagnosticRelevance::BlastRadius,
+            CompletenessStatus::Partial,
+            None,
+            None,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // AnalysisCompleteness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn complete_has_no_reasons_and_is_complete() {
+        let c = AnalysisCompleteness::complete();
+        assert_eq!(c.status, CompletenessStatus::Complete);
+        assert!(c.is_complete);
+        assert!(c.reasons.is_empty());
+    }
+
+    #[test]
+    fn partial_and_degraded_keep_reasons_and_are_not_complete() {
+        let reasons = vec![
+            "pods scope failed".to_string(),
+            "ingress unresolved".to_string(),
+        ];
+
+        let partial = AnalysisCompleteness::partial(reasons.clone());
+        assert_eq!(partial.status, CompletenessStatus::Partial);
+        assert!(!partial.is_complete);
+        assert_eq!(partial.reasons, reasons);
+
+        let degraded = AnalysisCompleteness::degraded(reasons.clone());
+        assert_eq!(degraded.status, CompletenessStatus::Degraded);
+        assert!(!degraded.is_complete);
+        assert_eq!(degraded.reasons, reasons);
+    }
+
+    #[test]
+    fn new_keeps_is_complete_in_sync_with_status() {
+        for status in [
+            CompletenessStatus::Complete,
+            CompletenessStatus::Partial,
+            CompletenessStatus::Degraded,
+        ] {
+            let c = AnalysisCompleteness::new(status, vec!["reason".to_string()]);
+            assert_eq!(
+                c.is_complete,
+                status == CompletenessStatus::Complete,
+                "{status}"
+            );
+            assert_eq!(c.status, status);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Enum string forms and ordering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn severity_as_str_and_display_match() {
+        for (severity, expected) in [
+            (DiagnosticSeverity::Info, "INFO"),
+            (DiagnosticSeverity::Warning, "WARNING"),
+            (DiagnosticSeverity::Error, "ERROR"),
+        ] {
+            assert_eq!(severity.as_str(), expected);
+            assert_eq!(severity.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn relevance_as_str_and_display_match() {
+        for (relevance, expected) in [
+            (DiagnosticRelevance::Target, "TARGET"),
+            (DiagnosticRelevance::BlastRadius, "BLAST_RADIUS"),
+            (DiagnosticRelevance::Workspace, "WORKSPACE"),
+        ] {
+            assert_eq!(relevance.as_str(), expected);
+            assert_eq!(relevance.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn completeness_status_as_str_and_display_match() {
+        for (status, expected) in [
+            (CompletenessStatus::Complete, "COMPLETE"),
+            (CompletenessStatus::Partial, "PARTIAL"),
+            (CompletenessStatus::Degraded, "DEGRADED"),
+        ] {
+            assert_eq!(status.as_str(), expected);
+            assert_eq!(status.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn derived_ordering_follows_declaration_order() {
+        // Ord is derived, so reordering the variants would silently change how
+        // diagnostics sort. Pin the current order.
+        assert!(DiagnosticSeverity::Info < DiagnosticSeverity::Warning);
+        assert!(DiagnosticSeverity::Warning < DiagnosticSeverity::Error);
+
+        assert!(DiagnosticRelevance::Target < DiagnosticRelevance::BlastRadius);
+        assert!(DiagnosticRelevance::BlastRadius < DiagnosticRelevance::Workspace);
+
+        assert!(CompletenessStatus::Complete < CompletenessStatus::Partial);
+        assert!(CompletenessStatus::Partial < CompletenessStatus::Degraded);
+    }
+
+    // -----------------------------------------------------------------------
+    // Serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enums_serialize_to_the_same_strings_as_as_str() {
+        let pairs = [
+            (
+                serde_json::to_value(DiagnosticSeverity::Warning).unwrap(),
+                DiagnosticSeverity::Warning.as_str(),
+            ),
+            (
+                serde_json::to_value(DiagnosticRelevance::BlastRadius).unwrap(),
+                DiagnosticRelevance::BlastRadius.as_str(),
+            ),
+            (
+                serde_json::to_value(CompletenessStatus::Degraded).unwrap(),
+                CompletenessStatus::Degraded.as_str(),
+            ),
+        ];
+        for (json, expected) in pairs {
+            assert_eq!(json, serde_json::Value::String(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn enums_round_trip_through_json() {
+        let severity: DiagnosticSeverity = serde_json::from_str("\"ERROR\"").unwrap();
+        assert_eq!(severity, DiagnosticSeverity::Error);
+        let relevance: DiagnosticRelevance = serde_json::from_str("\"BLAST_RADIUS\"").unwrap();
+        assert_eq!(relevance, DiagnosticRelevance::BlastRadius);
+        let status: CompletenessStatus = serde_json::from_str("\"PARTIAL\"").unwrap();
+        assert_eq!(status, CompletenessStatus::Partial);
+
+        assert!(serde_json::from_str::<DiagnosticSeverity>("\"error\"").is_err());
+    }
+
+    #[test]
+    fn analysis_completeness_round_trips() {
+        let c = AnalysisCompleteness::partial(vec!["ingress scope timed out".to_string()]);
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["is_complete"], false);
+        assert_eq!(json["status"], "PARTIAL");
+        assert_eq!(json["reasons"][0], "ingress scope timed out");
+
+        let back: AnalysisCompleteness = serde_json::from_value(json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn diagnostic_round_trips_with_all_fields_set() {
+        let d = Diagnostic::new(
+            diagnostic_code::UNMAPPED_CONNECTION,
+            DiagnosticSeverity::Info,
+            "connection to 10.0.0.1:8080 could not be mapped",
+            Some(k8s_service("payments/api")),
+            Some(k8s_service("payments/db")),
+            Some("10.0.0.1:8080".to_string()),
+            Some("pods".to_string()),
+            vec![EvidenceId::new(), EvidenceId::new()],
+            DiagnosticRelevance::Workspace,
+            CompletenessStatus::Partial,
+            Some("2026-10-01T10:00:00Z".to_string()),
+            Some("2026-10-02T10:00:00Z".to_string()),
+        );
+
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["code"], "UNMAPPED_CONNECTION");
+        assert_eq!(json["severity"], "INFO");
+        assert_eq!(json["relevance"], "WORKSPACE");
+        assert_eq!(json["completeness_impact"], "PARTIAL");
+
+        let back: Diagnostic = serde_json::from_value(json).unwrap();
+        assert_eq!(back, d);
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostic constructors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unobserved_target_sets_code_severity_relevance_and_impact() {
+        let target = k8s_service("payments/api");
+        let d = Diagnostic::unobserved_target(target.clone());
+
+        assert_eq!(d.code, diagnostic_code::UNOBSERVED_TARGET);
+        assert_eq!(d.severity, DiagnosticSeverity::Error);
+        assert_eq!(d.relevance, DiagnosticRelevance::Target);
+        assert_eq!(d.completeness_impact, CompletenessStatus::Degraded);
+        assert_eq!(d.target, Some(target));
+        assert!(d.referenced_resource.is_none());
+        assert!(d.supporting_evidence_ids.is_empty());
+        assert!(d.message.contains("payments/api"), "{}", d.message);
+        assert!(d.message.contains("kubernetes"), "{}", d.message);
+    }
+
+    #[test]
+    fn new_keeps_every_field() {
+        let evidence = vec![EvidenceId::new()];
+        let d = Diagnostic::new(
+            diagnostic_code::INCOMPLETE_SCOPE,
+            DiagnosticSeverity::Warning,
+            "ingresses scope failed",
+            None,
+            None,
+            None,
+            Some("ingresses".to_string()),
+            evidence.clone(),
+            DiagnosticRelevance::Workspace,
+            CompletenessStatus::Partial,
+            None,
+            Some("2026-10-02T10:00:00Z".to_string()),
+        );
+
+        assert_eq!(d.code, "INCOMPLETE_SCOPE");
+        assert_eq!(d.message, "ingresses scope failed");
+        assert_eq!(d.scope.as_deref(), Some("ingresses"));
+        assert_eq!(d.supporting_evidence_ids, evidence);
+        assert_eq!(d.last_observed_at.as_deref(), Some("2026-10-02T10:00:00Z"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Deterministic ordering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sort_key_uses_empty_strings_for_missing_resources() {
+        let d = diag("INCOMPLETE_SCOPE", "pods failed", None, None);
+        assert_eq!(d.sort_key(), ("INCOMPLETE_SCOPE", "pods failed", "", ""));
+
+        let d = diag(
+            "UNRESOLVED_REFERENCE",
+            "missing",
+            Some("a/api"),
+            Some("a/db"),
+        );
+        assert_eq!(
+            d.sort_key(),
+            ("UNRESOLVED_REFERENCE", "missing", "a/api", "a/db")
+        );
+    }
+
+    #[test]
+    fn sorting_by_sort_key_is_deterministic_regardless_of_input_order() {
+        let expected = vec![
+            diag("INCOMPLETE_SCOPE", "pods failed", None, None),
+            diag("UNRESOLVED_REFERENCE", "missing", None, Some("a/db")),
+            diag(
+                "UNRESOLVED_REFERENCE",
+                "missing",
+                Some("a/api"),
+                Some("a/cache"),
+            ),
+            diag(
+                "UNRESOLVED_REFERENCE",
+                "missing",
+                Some("a/api"),
+                Some("a/db"),
+            ),
+            diag("UNRESOLVED_REFERENCE", "other", Some("a/api"), None),
+        ];
+
+        let mut reversed = expected.clone();
+        reversed.reverse();
+        let mut rotated = expected.clone();
+        rotated.rotate_left(2);
+
+        for mut input in [reversed, rotated] {
+            input.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+            assert_eq!(input, expected);
+        }
     }
 }
